@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   generateEventId, readEvents, appendEvent, renderEventsJsonl,
+  findCollabAcrossTransports, assertSlugUnique,
 } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { LOCAL_COLLABS_ROOT } from '../skills/collab/scripts/transport.mjs';
 
 function mkCollabDir() {
   const dir = mkdtempSync(join(tmpdir(), 'collab-event-store-'));
@@ -126,4 +128,45 @@ test('appendEvent refuses to write to v0.1.x hybrid dir (events.jsonl present, e
   const evt = { event_id: 'evt-202605250922-hk-aaaa', ts: '2026-05-25T09:22:00Z', author: 'a', slug: 's', type: 'turn', references: [], payload: {} };
   assert.throws(() => appendEvent(dir, evt), /v0\.1\.x collab/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('findCollabAcrossTransports returns null when slug absent everywhere', () => {
+  // Use a slug guaranteed not to exist anywhere
+  const r = findCollabAcrossTransports('definitely-not-a-real-slug-xyz-' + Date.now());
+  assert.equal(r, null);
+});
+
+test('findCollabAcrossTransports finds slug in localhost transport', () => {
+  const uniq = 'find-test-' + Date.now();
+  const dirName = `2026-05-25-${uniq}`;
+  const dir = join(LOCAL_COLLABS_ROOT, dirName);
+  mkdirSync(join(dir, 'events'), { recursive: true });
+  appendEvent(dir, { event_id: 'evt-001', ts: '2026-05-25T09:22:00Z', author: 'a@cc:m5', slug: uniq, type: 'kickoff', references: [], payload: {} });
+  try {
+    const r = findCollabAcrossTransports(uniq);
+    assert.ok(r);
+    assert.equal(r.transport, 'localhost');
+    assert.equal(r.dirName, dirName);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('assertSlugUnique throws when slug exists in localhost', () => {
+  const uniq = 'assert-test-' + Date.now();
+  const dirName = `2026-05-25-${uniq}`;
+  const dir = join(LOCAL_COLLABS_ROOT, dirName);
+  mkdirSync(join(dir, 'events'), { recursive: true });
+  appendEvent(dir, { event_id: 'evt-001', ts: '2026-05-25T09:22:00Z', author: 'a@cc:m5', slug: uniq, type: 'kickoff', references: [], payload: {} });
+  try {
+    assert.throws(() => assertSlugUnique(uniq), /already exists/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('assertSlugUnique does not throw when slug is unique', () => {
+  const uniq = 'unique-slug-' + Date.now();
+  // Don't create anything; just assert it doesn't throw
+  assertSlugUnique(uniq); // throws on failure; test passes by not-throwing
 });

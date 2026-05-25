@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 // detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
 // Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
-import { detectHarness } from './transport.mjs';
+import { detectHarness, LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT } from './transport.mjs';
 export { detectHarness };
 
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
@@ -136,6 +136,40 @@ export function resolveCollabRef(ref) {
   if (candidates.length === 1) return candidates[0];
   if (candidates.length > 1) return { ambiguous: true, candidates };
   return null;
+}
+
+// Scan all known transport roots for a slug. Returns
+// { transport, dir, dirName } on first hit, or null if absent everywhere.
+//
+// Transports searched:
+//   - localhost (LOCAL_COLLABS_ROOT)
+//   - every github:<repo> discovered by listing GITHUB_REPOS_ROOT for a collabs/ subdirectory
+export function findCollabAcrossTransports(slug) {
+  const roots = [];
+  if (existsSync(LOCAL_COLLABS_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
+  if (existsSync(GITHUB_REPOS_ROOT)) {
+    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const candidate = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
+      if (existsSync(candidate)) roots.push({ transport: `github:${e.name}`, root: candidate });
+    }
+  }
+  for (const { transport, root } of roots) {
+    for (const e of readdirSync(root, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const slugPart = e.name.replace(/^\d{4}-\d{2}-\d{2}-/, '');
+      if (slugPart === slug) return { transport, dir: join(root, e.name), dirName: e.name };
+    }
+  }
+  return null;
+}
+
+// Throw when slug exists in any transport. Used by collab-kickoff.mjs (§6.3 strict).
+export function assertSlugUnique(slug) {
+  const hit = findCollabAcrossTransports(slug);
+  if (hit) {
+    throw new Error(`A collab named "${slug}" already exists in transport "${hit.transport}" (dir: ${hit.dirName}). Rephrase the kickoff message to derive a different slug.`);
+  }
 }
 
 export function createCollabDir(slug) {
