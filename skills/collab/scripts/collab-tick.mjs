@@ -15,12 +15,18 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  findCollabDir, readEvents, nextEventId, appendEvent,
+  findCollabAcrossTransports, readEvents, nextEventId, appendEvent,
   deriveTriplet, hasJoined, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
   gitPullRebase, gitCommitPush,
 } from './collab-event-helpers.mjs';
+import { isGitTransport } from './transport.mjs';
 import { render } from './collab-render.mjs';
+
+function transportFromEvents(events) {
+  const k = events.find(e => e.type === 'kickoff');
+  return k?.payload?.transport || 'github:files';
+}
 
 export function detectRoute(events, triplet, nowTs) {
   if (isClosed(events)) return 'closed';
@@ -43,11 +49,13 @@ export function detectRoute(events, triplet, nowTs) {
 export async function tickDeterministic(slug, options = {}) {
   const { workspaceId = 'unknown', triplet: givenTriplet, dryRun = false } = options;
   const nowTs = new Date().toISOString();
-  if (!dryRun) gitPullRebase();
 
-  const dir = findCollabDir(slug);
-  if (!dir) throw new Error(`no collab directory for slug: ${slug}`);
+  const hit = findCollabAcrossTransports(slug);
+  if (!hit) throw new Error(`no collab directory for slug: ${slug}`);
+  const dir = hit.dir;
   const events = readEvents(dir);
+  const transport = transportFromEvents(events);
+  if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
   const triplet = givenTriplet || deriveTriplet(workspaceId);
 
   if (!hasJoined(events, triplet)) {
@@ -70,7 +78,7 @@ export async function tickDeterministic(slug, options = {}) {
     if (!dryRun) {
       appendEvent(dir, ev);
       await render(slug, { collabDir: dir, author: triplet });
-      gitCommitPush(dir, `[${triplet}] close: ${slug} ${ev.event_id} (${outcomes[net]})`);
+      if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${outcomes[net]})`);
     }
     return { action: 'close', reason: net, event: ev };
   }
@@ -85,7 +93,7 @@ export async function tickDeterministic(slug, options = {}) {
     if (!dryRun) {
       appendEvent(dir, ev);
       await render(slug, { collabDir: dir, author: triplet });
-      gitCommitPush(dir, `[${triplet}] close: ${slug} ${ev.event_id} (converged)`);
+      if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (converged)`);
     }
     return { action: 'close', reason: 'converged', event: ev };
   }

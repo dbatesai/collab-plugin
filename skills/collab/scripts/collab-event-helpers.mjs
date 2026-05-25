@@ -305,6 +305,18 @@ export function getTickIntervalMs(events) {
   return minutes * 60 * 1000;
 }
 
+// Per-collab ratification window. Reads `ratification_window_minutes` from the
+// kickoff event's payload (v0.2). Falls back to 3 × tick_interval (v0.1.x behavior)
+// when the new field is absent.
+export function getRatificationWindowMs(events) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const minutes = kickoff?.payload?.ratification_window_minutes;
+  if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) {
+    return minutes * 60 * 1000;
+  }
+  return 3 * getTickIntervalMs(events);
+}
+
 export function checkSafetyNets(events, nowTs) {
   const kickoff = events.find(e => e.type === 'kickoff');
   if (!kickoff) return null;
@@ -351,7 +363,7 @@ export function getRatificationStatus(events, nowTs) {
   const now = new Date(nowTs || new Date().toISOString());
   const proposeTs = new Date(proposeClose.ts);
   const silenceElapsed = now - proposeTs;
-  const silenceRatifyMs = 3 * getTickIntervalMs(events);
+  const silenceRatifyMs = getRatificationWindowMs(events);
   const eligibleForSilenceRatify = silenceElapsed > silenceRatifyMs;
 
   const implicitRatified = new Set();
