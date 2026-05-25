@@ -1,21 +1,32 @@
 /**
  * collab-kickoff.mjs — kickoff a new collaboration.
- * Derives slug + IGM, writes KICKOFF.md + events.jsonl (kickoff + self-join), commits + pushes.
+ * Derives slug + IGM, writes KICKOFF.md + events (kickoff + self-join), commits + pushes
+ * (when transport is git-mediated). Transport-aware (v0.2): supports localhost and github:<repo>.
+ *
  * CLI: node collab-kickoff.mjs "<message>" --workspace-id <id> [--dry-run]
+ *      [--transport <id>] [--tick-interval-minutes <n>] [--pin <6-digits>]
+ *      [--ratification-window-minutes <n>] [--min-version <semver>]
  */
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
-import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  deriveSlug, createCollabDir, nextEventId, appendEvent,
+  deriveSlug, appendEvent, renderEventsJsonl,
   deriveTriplet, gitPullRebase, gitCommitPush, generatePin,
+  assertSlugUnique, generateEventId, authorSlugFromTriplet,
 } from './collab-event-helpers.mjs';
+import {
+  parseTransport, isGitTransport, resolveTransportPaths,
+  defaultTickIntervalMinutes, defaultRatificationWindowMinutes, preflightTransport,
+} from './transport.mjs';
 
-export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes, pin) {
+export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes, pin, opts = {}) {
   const payload = { message, igm, capabilities_wanted: capabilitiesWanted, wall_clock_hours: wallClockHours };
   if (typeof tickIntervalMinutes === 'number') payload.tick_interval_minutes = tickIntervalMinutes;
   if (typeof pin === 'string' && /^\d{6}$/.test(pin)) payload.pin = pin;
+  if (typeof opts.transport === 'string') payload.transport = opts.transport;
+  if (typeof opts.ratificationWindowMinutes === 'number') payload.ratification_window_minutes = opts.ratificationWindowMinutes;
+  if (typeof opts.minCollabPluginVersion === 'string') payload.min_collab_plugin_version = opts.minCollabPluginVersion;
   return payload;
 }
 
@@ -42,35 +53,98 @@ export function buildKickoffMd(slug, message, igm, capabilitiesWanted, author) {
 }
 
 export async function kickoff(message, options = {}) {
-  const { workspaceId = 'unknown', dryRun = false, wallClockHours = 24, capabilitiesWanted = [], tickIntervalMinutes, pin } = options;
-  if (!dryRun) gitPullRebase();
+  const {
+    workspaceId = 'unknown',
+    dryRun = false,
+    wallClockHours = 24,
+    capabilitiesWanted = [],
+    tickIntervalMinutes,
+    pin,
+    transport = 'github:files',
+    ratificationWindowMinutes,
+    minCollabPluginVersion = '0.2.0',
+  } = options;
+
+  if (!parseTransport(transport)) throw new Error(`invalid transport: ${transport}`);
 
   const slug = deriveSlug(message);
+
+  // Order is load-bearing: collision check before any side effects (preflight, git, mkdir).
+  if (!dryRun) assertSlugUnique(slug);
+
+  const date = new Date().toISOString().slice(0, 10);
+  const dirName = `${date}-${slug}`;
+
+  if (!dryRun) {
+    const pf = preflightTransport(transport);
+    if (!pf.ok) throw new Error(`preflight failed: ${pf.error}`);
+  }
+
+  if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
+
   const igm = deriveIGM(message);
   const triplet = deriveTriplet(workspaceId);
   const nowTs = new Date().toISOString();
   const collabPin = pin || generatePin();
-  const dir = createCollabDir(slug);
+  const tickMin = typeof tickIntervalMinutes === 'number'
+    ? tickIntervalMinutes
+    : defaultTickIntervalMinutes(transport);
+  const ratMin = typeof ratificationWindowMinutes === 'number'
+    ? ratificationWindowMinutes
+    : defaultRatificationWindowMinutes(transport, tickMin);
 
-  writeFileSync(join(dir, 'KICKOFF.md'), buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet));
+  const { collabDir, turnsDir } = resolveTransportPaths(transport, dirName);
+  mkdirSync(turnsDir, { recursive: true });
+  writeFileSync(join(collabDir, 'KICKOFF.md'), buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet));
 
-  const kickoffEvt = { event_id:'evt-001', ts:nowTs, author:triplet, slug, type:'kickoff', references:[],
-    payload: buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours, tickIntervalMinutes, collabPin) };
-  appendEvent(dir, kickoffEvt);
+  const authorSlug = authorSlugFromTriplet(triplet);
+  const kickoffEvtId = generateEventId(nowTs, authorSlug);
+  const kickoffEvt = {
+    event_id: kickoffEvtId,
+    ts: nowTs,
+    author: triplet,
+    slug,
+    type: 'kickoff',
+    references: [],
+    payload: buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours, tickMin, collabPin, {
+      transport,
+      ratificationWindowMinutes: ratMin,
+      minCollabPluginVersion,
+    }),
+  };
+  appendEvent(collabDir, kickoffEvt);
 
-  const joinEvt = { event_id:'evt-002', ts:nowTs, author:triplet, slug, type:'join', references:['evt-001'],
-    payload: buildSelfJoinPayload([], 'Originator; self-joined at kickoff') };
-  appendEvent(dir, joinEvt);
+  const joinEvt = {
+    event_id: generateEventId(nowTs, authorSlug),
+    ts: nowTs,
+    author: triplet,
+    slug,
+    type: 'join',
+    references: [kickoffEvtId],
+    payload: buildSelfJoinPayload([], 'Originator; self-joined at kickoff'),
+  };
+  appendEvent(collabDir, joinEvt);
 
-  if (!dryRun) gitCommitPush(dir, `[${triplet}] kickoff: ${slug} evt-001`);
-  return { slug, triplet, dir, kickoffEvt, joinEvt, pin: collabPin };
+  renderEventsJsonl(collabDir);
+
+  if (!dryRun && isGitTransport(transport)) {
+    gitCommitPush(collabDir, transport, `[${triplet}] kickoff: ${slug} ${kickoffEvtId}`);
+  }
+
+  return {
+    slug, triplet, dir: collabDir, transport,
+    tickIntervalMinutes: tickMin, ratificationWindowMinutes: ratMin,
+    kickoffEvt, joinEvt, pin: collabPin,
+  };
 }
 
 export function main(argv) {
-  let message = null, workspaceId = null, dryRun = false, tickIntervalMinutes, pin;
+  let message = null, workspaceId = null, dryRun = false;
+  let tickIntervalMinutes, pin, transport, ratificationWindowMinutes, minCollabPluginVersion;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
     else if (argv[i] === '--dry-run') dryRun = true;
+    else if (argv[i] === '--transport') transport = argv[++i];
     else if (argv[i] === '--tick-interval-minutes') {
       const n = Number(argv[++i]);
       if (!Number.isFinite(n) || n <= 0 || n > 1440) {
@@ -78,6 +152,21 @@ export function main(argv) {
         return 2;
       }
       tickIntervalMinutes = n;
+    }
+    else if (argv[i] === '--ratification-window-minutes') {
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n) || n <= 0 || n > 1440) {
+        process.stderr.write('--ratification-window-minutes must be a positive number, 1–1440\n');
+        return 2;
+      }
+      ratificationWindowMinutes = n;
+    }
+    else if (argv[i] === '--min-version') {
+      minCollabPluginVersion = argv[++i];
+      if (!/^\d+\.\d+\.\d+$/.test(minCollabPluginVersion)) {
+        process.stderr.write('--min-version must be a semver string like 0.2.0\n');
+        return 2;
+      }
     }
     else if (argv[i] === '--pin') {
       pin = argv[++i];
@@ -88,11 +177,24 @@ export function main(argv) {
     }
     else if (!argv[i].startsWith('--')) message = argv[i];
   }
-  if (!message) { process.stderr.write('usage: collab-kickoff.mjs "<message>" [--workspace-id <id>] [--tick-interval-minutes <n>] [--pin <6-digits>] [--dry-run]\n'); return 2; }
-  kickoff(message, { workspaceId, dryRun, tickIntervalMinutes, pin })
+  if (!message) {
+    process.stderr.write('usage: collab-kickoff.mjs "<message>" [--workspace-id <id>] [--transport <id>] [--tick-interval-minutes <n>] [--ratification-window-minutes <n>] [--min-version <semver>] [--pin <6-digits>] [--dry-run]\n');
+    return 2;
+  }
+  kickoff(message, {
+    workspaceId, dryRun, tickIntervalMinutes, pin,
+    transport, ratificationWindowMinutes, minCollabPluginVersion,
+  })
     .then(r => {
-      const cadenceMin = tickIntervalMinutes ?? 30;
-      process.stdout.write(`Kickoff: ${r.slug}\nPIN: ${r.pin}  (your manual-entry shorthand; agents still use the slug)\nStart: /loop ${cadenceMin}m /collab "look at slug ${r.slug}"\nOr (your shorthand): /collab ${r.pin}\n`);
+      process.stdout.write(
+        `Kickoff: ${r.slug}\n` +
+        `Transport: ${r.transport}\n` +
+        `Tick interval: ${r.tickIntervalMinutes}m\n` +
+        `Ratification window: ${r.ratificationWindowMinutes}m\n` +
+        `PIN: ${r.pin}  (your manual-entry shorthand; agents still use the slug)\n` +
+        `Start: /loop ${r.tickIntervalMinutes}m /collab "look at slug ${r.slug}"\n` +
+        `Or (your shorthand): /collab ${r.pin}\n`,
+      );
     })
     .catch(e => { process.stderr.write(`kickoff error: ${e.message}\n`); process.exit(1); });
 }

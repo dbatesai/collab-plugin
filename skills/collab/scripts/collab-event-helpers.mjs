@@ -10,14 +10,17 @@ import {
   existsSync, mkdirSync, readdirSync, renameSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 // detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
 // Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
-import { detectHarness, LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT } from './transport.mjs';
+import {
+  detectHarness, LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT,
+  parseTransport, collabsRootForTransport,
+} from './transport.mjs';
 export { detectHarness };
 
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
@@ -377,18 +380,30 @@ export function getRatificationStatus(events, nowTs) {
 
 // --- Git transport ---
 
-export function gitPullRebase() {
-  const r = spawnSync('git', ['pull', '--rebase'], { cwd: FILES_REPO, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git pull --rebase failed: ${r.stderr}`);
+// repoForTransport: parent of the collabs/ dir for a github:<repo> transport.
+// Throws if called on a non-git transport (localhost) — callers must guard with isGitTransport.
+function repoForTransport(transport) {
+  const p = parseTransport(transport);
+  if (!p || p.kind !== 'github') {
+    throw new Error(`git helpers require a github transport; got ${transport}`);
+  }
+  return dirname(collabsRootForTransport(transport));
 }
 
-export function gitCommitPush(collabDir, commitMsg) {
-  spawnSync('git', ['add', collabDir], { cwd: FILES_REPO, encoding: 'utf8' });
-  spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: FILES_REPO, encoding: 'utf8' });
+export function gitPullRebase(transport) {
+  const repo = repoForTransport(transport);
+  const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
+}
+
+export function gitCommitPush(collabDir, transport, commitMsg) {
+  const repo = repoForTransport(transport);
+  spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8' });
+  spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8' });
   for (let i = 1; i <= 3; i++) {
-    const push = spawnSync('git', ['push'], { cwd: FILES_REPO, encoding: 'utf8' });
+    const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8' });
     if (push.status === 0) return;
-    spawnSync('git', ['pull', '--rebase'], { cwd: FILES_REPO, encoding: 'utf8' });
+    spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
   }
-  throw new Error('git push failed after 3 attempts');
+  throw new Error(`git push failed after 3 attempts in ${repo}`);
 }

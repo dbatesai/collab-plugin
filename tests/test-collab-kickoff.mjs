@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 
 let deriveSlug, nextEventId, authorSlugFromTriplet;
 try {
@@ -67,11 +69,11 @@ test('authorSlugFromTriplet: extracts workspace id', () => {
   assert.equal(authorSlugFromTriplet('core-framework@claude-code:home'), 'core-framework');
 });
 
-let buildKickoffPayload, buildSelfJoinPayload;
+let buildKickoffPayload, buildSelfJoinPayload, kickoff;
 try {
-  ({ buildKickoffPayload, buildSelfJoinPayload } = await import('../skills/collab/scripts/collab-kickoff.mjs'));
+  ({ buildKickoffPayload, buildSelfJoinPayload, kickoff } = await import('../skills/collab/scripts/collab-kickoff.mjs'));
 } catch {
-  buildKickoffPayload = buildSelfJoinPayload = () => { throw new Error('not implemented'); };
+  buildKickoffPayload = buildSelfJoinPayload = kickoff = () => { throw new Error('not implemented'); };
 }
 
 test('buildKickoffPayload has all required IGM fields', () => {
@@ -85,4 +87,46 @@ test('buildSelfJoinPayload has required fields', () => {
   const p = buildSelfJoinPayload(['architecture-review'], 'I will review the arch');
   assert.ok(Array.isArray(p.capability_match));
   assert.ok(p.commitment);
+});
+
+test('buildKickoffPayload includes transport, ratification_window_minutes, min_collab_plugin_version', () => {
+  const payload = buildKickoffPayload('msg', { intention: 'i', goal: 'g', measure: 'm' }, [], 24, 2, undefined, {
+    transport: 'localhost',
+    ratificationWindowMinutes: 30,
+    minCollabPluginVersion: '0.2.0',
+  });
+  assert.equal(payload.transport, 'localhost');
+  assert.equal(payload.tick_interval_minutes, 2);
+  assert.equal(payload.ratification_window_minutes, 30);
+  assert.equal(payload.min_collab_plugin_version, '0.2.0');
+});
+
+test('kickoff rejects when slug already exists in any transport', async () => {
+  const { LOCAL_COLLABS_ROOT } = await import('../skills/collab/scripts/transport.mjs');
+  const { appendEvent } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
+  const stamp = Date.now();
+  const slug = `kickoff-collision-test-${stamp}`;
+  const dirName = `2026-05-25-${slug}`;
+  const collisionDir = join(LOCAL_COLLABS_ROOT, dirName);
+  mkdirSync(join(collisionDir, 'events'), { recursive: true });
+  appendEvent(collisionDir, {
+    event_id: 'evt-001',
+    ts: '2026-05-25T09:22:00Z',
+    author: 'a@cc:m5',
+    slug,
+    type: 'kickoff',
+    references: [],
+    payload: {},
+  });
+  try {
+    // Phrase kickoff message so deriveSlug produces the same slug
+    // (deriveSlug replaces non-alnum with hyphens; spaces → hyphens; collapse).
+    const message = slug.replace(/-/g, ' ');
+    await assert.rejects(
+      () => kickoff(message, { transport: 'github:files', dryRun: false, workspaceId: 'test' }),
+      /already exists/,
+    );
+  } finally {
+    rmSync(collisionDir, { recursive: true, force: true });
+  }
 });
