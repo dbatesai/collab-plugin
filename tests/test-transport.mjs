@@ -60,13 +60,13 @@ test('resolveTransportPaths returns ~/Documents/Projects/<repo>/collabs/<date>-<
 
 test('preflightTransport succeeds on writable directory', () => {
   const tmp = mkdtempSync(join(tmpdir(), 'preflight-ok-'));
-  const r = preflightTransport.__withRoot(tmp, 'localhost', '2026-05-25-test');
+  const r = preflightTransport.__withRoot(tmp);
   assert.equal(r.ok, true, r.error || 'expected ok');
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test('preflightTransport reports error on unwritable directory', () => {
-  const r = preflightTransport.__withRoot('/proc/cannot-create-here', 'localhost', '2026-05-25-test');
+test('preflightTransport reports error when root cannot be created', () => {
+  const r = preflightTransport.__withRoot('/proc/cannot-create-here');
   assert.equal(r.ok, false);
   assert.ok(r.error && r.error.length > 0);
 });

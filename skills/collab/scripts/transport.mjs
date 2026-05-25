@@ -74,12 +74,15 @@ function _preflight(rootDir) {
   }
 }
 
-export function preflightTransport(transport, dirName) {
+export function preflightTransport(transport) {
   return _preflight(collabsRootForTransport(transport));
 }
 
-preflightTransport.__withRoot = (root, transport, dirName) => _preflight(root);
+preflightTransport.__withRoot = (root) => _preflight(root);
 
+// detectHarness v0.2 fallback chain. The legacy implementation in collab-event-helpers.mjs
+// is still live during v0.2 implementation; Task 3 deletes it and re-exports this one,
+// so deriveTriplet routes through the COLLAB_HARNESS_OVERRIDE escape hatch (Finding #15 fix).
 export function detectHarness() {
   if (process.env.CODEX_PLUGIN_ROOT)  return 'codex';
   if (process.env.GEMINI_PLUGIN_ROOT) return 'gemini';
