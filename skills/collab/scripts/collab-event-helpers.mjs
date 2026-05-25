@@ -7,8 +7,9 @@
  */
 import {
   readFileSync, writeFileSync, appendFileSync,
-  existsSync, mkdirSync, readdirSync
+  existsSync, mkdirSync, readdirSync, renameSync, statSync,
 } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -77,6 +78,18 @@ export function deriveSlug(message) {
   return lastHyphen > 0 ? truncated.slice(0, lastHyphen) : truncated;
 }
 
+// --- Event ID ---
+
+// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<4-hex-random>.
+// Lexicographic sort on filename = chronological order (no central counter).
+export function generateEventId(tsIso, authorSlug) {
+  const d = new Date(tsIso);
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
+  const rand = randomBytes(2).toString('hex');
+  return `evt-${stamp}-${authorSlug}-${rand}`;
+}
+
 // --- Triplet ---
 
 export function detectHarness() {
@@ -140,22 +153,77 @@ export function createCollabDir(slug) {
 
 // --- Event I/O ---
 
+// Read all events from <collabDir>/events/*.json. Sort by ts, then event_id as tie-breaker.
+// Backward compat: if events/ does not exist but events.jsonl does, read JSONL directly (v0.1.x).
 export function readEvents(collabDir) {
-  const path = join(collabDir, 'events.jsonl');
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+  const eventsDir = join(collabDir, 'events');
+  if (existsSync(eventsDir)) {
+    const seen = new Map(); // event_id → event (first wins on dup)
+    for (const name of readdirSync(eventsDir)) {
+      if (!name.endsWith('.json') || name.startsWith('.tmp-')) continue;
+      const path = join(eventsDir, name);
+      try {
+        const content = readFileSync(path, 'utf8');
+        const event = JSON.parse(content);
+        if (!event || typeof event !== 'object' || !event.event_id || !event.ts) {
+          process.stderr.write(`(warn) skipping malformed event file ${path}\n`);
+          continue;
+        }
+        if (!seen.has(event.event_id)) seen.set(event.event_id, event);
+      } catch (e) {
+        process.stderr.write(`(warn) skipping unreadable event file ${path}: ${e.message}\n`);
+      }
+    }
+    return [...seen.values()].sort((a, b) => {
+      if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
+      return a.event_id < b.event_id ? -1 : 1;
+    });
+  }
+  const jsonlPath = join(collabDir, 'events.jsonl');
+  if (!existsSync(jsonlPath)) return [];
+  return readFileSync(jsonlPath, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
 }
 
+// Atomic write: temp file + rename. Always writes to events/ dir.
+//
+// v0.1.x hybrid guard: if this collab dir has events.jsonl but no events/, refuse
+// to write. The first append would otherwise strand all prior JSONL events behind
+// the new events/ directory (which readEvents prefers when present). Surfacing
+// the conflict loudly is the right move per spec §9.6 (read-only compat).
+export function appendEvent(collabDir, event) {
+  const eventsDir = join(collabDir, 'events');
+  const jsonlPath = join(collabDir, 'events.jsonl');
+  if (!existsSync(eventsDir) && existsSync(jsonlPath)) {
+    throw new Error(
+      `Refusing to write to v0.1.x collab at ${collabDir}: events.jsonl present but no events/ directory. ` +
+      `v0.2 cannot safely append to v0.1.x collabs because the first append would strand the existing history. ` +
+      `Either run this collab on a fresh slug or migrate the JSONL forward (manual: read events.jsonl, write each line as events/<event_id>.json).`,
+    );
+  }
+  if (!existsSync(eventsDir)) mkdirSync(eventsDir, { recursive: true });
+  const finalPath = join(eventsDir, `${event.event_id}.json`);
+  const tmpPath = join(eventsDir, `.tmp-${event.event_id}-${process.pid}-${Date.now()}.json`);
+  writeFileSync(tmpPath, JSON.stringify(event, null, 2));
+  renameSync(tmpPath, finalPath);
+}
+
+// Regenerate events.jsonl from events/ dir (render artifact, not source of truth).
+export function renderEventsJsonl(collabDir) {
+  const events = readEvents(collabDir);
+  const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
+  writeFileSync(join(collabDir, 'events.jsonl'), content);
+}
+
+// nextEventId: legacy helper for v0.1.x sequential IDs (still produced by kickoff for
+// evt-001 display). v0.2 uses generateEventId for everything else.
 export function nextEventId(events) {
   if (events.length === 0) return 'evt-001';
-  const last = events[events.length - 1].event_id;
+  const seq = events.filter(e => /^evt-\d{3,}$/.test(e.event_id));
+  if (seq.length === 0) return generateEventId(new Date().toISOString(), 'sys');
+  const last = seq[seq.length - 1].event_id;
   const n = parseInt(last.replace('evt-', ''), 10) + 1;
   const width = Math.max(3, String(n).length);
   return 'evt-' + String(n).padStart(width, '0');
-}
-
-export function appendEvent(collabDir, event) {
-  appendFileSync(join(collabDir, 'events.jsonl'), JSON.stringify(event) + '\n');
 }
 
 // --- Event queries ---
