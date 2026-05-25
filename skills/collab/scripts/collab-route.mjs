@@ -11,7 +11,7 @@
 import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { COLLABS_DIR, readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir } from './collab-event-helpers.mjs';
+import { COLLABS_DIR, readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir, isPinRef } from './collab-event-helpers.mjs';
 
 const SLUG_PATTERNS = [
   /\bslug\s+([a-z0-9][a-z0-9-]{0,49})\b/i,
@@ -20,6 +20,7 @@ const SLUG_PATTERNS = [
   /\bcancel\s+(?:slug\s+)?([a-z0-9][a-z0-9-]{0,49})\b/i,
   /\bstatus\s+(?:of\s+)?([a-z0-9][a-z0-9-]{0,49})\b/i,
   /\bhappening with\s+([a-z0-9][a-z0-9-]{0,49})\b/i,
+  /(?:^|\s)(\d{6})(?:\s|$)/, // bare PIN — David's manual-entry shorthand
 ];
 
 const ABORT_RE = /\b(abort|cancel)\b/i;
@@ -33,8 +34,16 @@ export function extractSlug(message) {
   return null;
 }
 
+// If the extracted ref is a 6-digit PIN, resolve it to a full slug via
+// state.pinIndex. Returns the resolved slug or the original ref if no match.
+function resolvePinRef(ref, state) {
+  if (!ref || !isPinRef(ref)) return ref;
+  return state.pinIndex?.get(ref) || ref;
+}
+
 export function detectAction(message, state) {
-  const extractedSlug = extractSlug(message);
+  const rawSlug = extractSlug(message);
+  const extractedSlug = resolvePinRef(rawSlug, state);
 
   if (ABORT_RE.test(message) && extractedSlug) {
     if (state.existsActive.has(extractedSlug)) {
@@ -67,15 +76,21 @@ export function detectAction(message, state) {
 }
 
 export function buildStateFromDisk(triplet) {
-  const state = { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
+  const state = { existsActive: new Set(), existsClosed: new Set(), joined: new Set(), pinIndex: new Map() };
   if (!existsSync(COLLABS_DIR)) return state;
   for (const e of readdirSync(COLLABS_DIR, { withFileTypes: true })) {
     if (!e.isDirectory()) continue;
     const slug = e.name.replace(/^\d{4}-\d{2}-\d{2}-/, '');
     const events = readEvents(join(COLLABS_DIR, e.name));
-    if (isClosed(events)) state.existsClosed.add(slug);
-    else state.existsActive.add(slug);
+    const active = !isClosed(events);
+    if (active) state.existsActive.add(slug); else state.existsClosed.add(slug);
     if (hasJoined(events, triplet)) state.joined.add(slug);
+    // PIN index: active collabs win on collision (vanishingly unlikely).
+    const kickoff = events.find(ev => ev.type === 'kickoff');
+    const pin = kickoff?.payload?.pin;
+    if (pin && /^\d{6}$/.test(pin) && (active || !state.pinIndex.has(pin))) {
+      state.pinIndex.set(pin, slug);
+    }
   }
   return state;
 }

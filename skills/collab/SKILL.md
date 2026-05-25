@@ -28,15 +28,19 @@ Output is JSON: `{ route, slug?, extractedSlug?, triplet }`.
 - `route: "abort"` — message says abort/cancel + names a known active slug
 - `route: "fuzzy"` — message references a slug-shaped string that doesn't match. Ask the user for disambiguation, or treat as kickoff if appropriate.
 
+**PINs (David's manual-entry shorthand).** A kickoff event stores a 6-digit `pin` in its payload so David can refer to a collab by `/collab 654321` instead of typing the full slug. The route script resolves a bare 6-digit number to the corresponding full slug before action detection. **Agents always communicate by slug** — in event payloads, in messages to peers, in status reports. The PIN exists solely so David can start an agent on a topic with minimal typing; the slug is the canonical identifier from that point on.
+
 ## Step 2: Execute the route
 
 ### Route: kickoff
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--tick-interval-minutes <n>]
+node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--tick-interval-minutes <n>] [--pin <6-digits>]
 ```
 
-This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits, and pushes. Stdout reports the slug and the recommended `/loop` command at the chosen cadence.
+This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits, and pushes. Stdout reports the slug, the auto-generated 6-digit PIN (David's manual-entry shorthand), and the recommended `/loop` command at the chosen cadence.
+
+`--pin <6-digits>` (optional) lets the caller supply a specific PIN instead of generating one randomly; useful for testing or when David has a preferred number to remember.
 
 `--tick-interval-minutes <n>` (optional; default 30) sets the per-collab tick cadence. Two safety nets scale with it: the stall threshold (6 × tick) and the silence-as-ratification window (3 × tick). Use `5` for localhost-pattern rapid iteration on a single machine; keep the default `30` for cross-machine or multi-day collabs where peers may be intermittent. Valid range: 1–1440.
 

@@ -21,6 +21,46 @@ export const STALL_TICKS = 6;
 export const MAX_OBJECTION_CYCLES = 3;
 export const SILENCE_RATIFY_MS = 3 * TICK_INTERVAL_MS; // default 90 min — 3 ticks at 30-min cadence; scaled per-collab below
 
+// --- PIN ---
+
+// 6-digit shorthand id for a collab. Stored on the kickoff event's payload as
+// `pin`; not part of the slug or directory name. Lets a user (or peer) refer to
+// a collab as "/collab 654321" instead of typing the full semantic slug. With
+// ~10 active collabs ever and 1M possible values, collision risk is negligible;
+// the date in the dir name and event timestamps disambiguate further if needed.
+export function generatePin() {
+  return String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
+}
+
+export function isPinRef(ref) {
+  return typeof ref === 'string' && /^\d{6}$/.test(ref);
+}
+
+// Resolve a 6-digit PIN to a collab dir by scanning all collabs' evt-001
+// kickoff events. Returns null if no match, or { dir, slug, pin } on hit.
+// Prefers active collabs over closed ones; if there's still ambiguity (same
+// pin on multiple active collabs — vanishingly rare), returns { ambiguous: true, candidates }.
+export function resolveCollabByPin(pin) {
+  if (!isPinRef(pin)) return null;
+  if (!existsSync(COLLABS_DIR)) return null;
+  const active = [], closed = [];
+  for (const e of readdirSync(COLLABS_DIR, { withFileTypes: true })) {
+    if (!e.isDirectory()) continue;
+    const dir = join(COLLABS_DIR, e.name);
+    const events = readEvents(dir);
+    const kickoff = events.find(ev => ev.type === 'kickoff');
+    if (!kickoff || kickoff.payload?.pin !== pin) continue;
+    const slug = e.name.replace(/^\d{4}-\d{2}-\d{2}-/, '');
+    const hit = { dir, slug, pin };
+    if (isClosed(events)) closed.push(hit); else active.push(hit);
+  }
+  if (active.length === 1) return active[0];
+  if (active.length > 1) return { ambiguous: true, candidates: active };
+  if (closed.length === 1) return closed[0];
+  if (closed.length > 1) return { ambiguous: true, candidates: closed };
+  return null;
+}
+
 // --- Slug ---
 
 export function deriveSlug(message) {

@@ -9,12 +9,13 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   deriveSlug, createCollabDir, nextEventId, appendEvent,
-  deriveTriplet, gitPullRebase, gitCommitPush,
+  deriveTriplet, gitPullRebase, gitCommitPush, generatePin,
 } from './collab-event-helpers.mjs';
 
-export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes) {
+export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes, pin) {
   const payload = { message, igm, capabilities_wanted: capabilitiesWanted, wall_clock_hours: wallClockHours };
   if (typeof tickIntervalMinutes === 'number') payload.tick_interval_minutes = tickIntervalMinutes;
+  if (typeof pin === 'string' && /^\d{6}$/.test(pin)) payload.pin = pin;
   return payload;
 }
 
@@ -41,19 +42,20 @@ export function buildKickoffMd(slug, message, igm, capabilitiesWanted, author) {
 }
 
 export async function kickoff(message, options = {}) {
-  const { workspaceId = 'unknown', dryRun = false, wallClockHours = 24, capabilitiesWanted = [], tickIntervalMinutes } = options;
+  const { workspaceId = 'unknown', dryRun = false, wallClockHours = 24, capabilitiesWanted = [], tickIntervalMinutes, pin } = options;
   if (!dryRun) gitPullRebase();
 
   const slug = deriveSlug(message);
   const igm = deriveIGM(message);
   const triplet = deriveTriplet(workspaceId);
   const nowTs = new Date().toISOString();
+  const collabPin = pin || generatePin();
   const dir = createCollabDir(slug);
 
   writeFileSync(join(dir, 'KICKOFF.md'), buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet));
 
   const kickoffEvt = { event_id:'evt-001', ts:nowTs, author:triplet, slug, type:'kickoff', references:[],
-    payload: buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours, tickIntervalMinutes) };
+    payload: buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours, tickIntervalMinutes, collabPin) };
   appendEvent(dir, kickoffEvt);
 
   const joinEvt = { event_id:'evt-002', ts:nowTs, author:triplet, slug, type:'join', references:['evt-001'],
@@ -61,11 +63,11 @@ export async function kickoff(message, options = {}) {
   appendEvent(dir, joinEvt);
 
   if (!dryRun) gitCommitPush(dir, `[${triplet}] kickoff: ${slug} evt-001`);
-  return { slug, triplet, dir, kickoffEvt, joinEvt };
+  return { slug, triplet, dir, kickoffEvt, joinEvt, pin: collabPin };
 }
 
 export function main(argv) {
-  let message = null, workspaceId = null, dryRun = false, tickIntervalMinutes;
+  let message = null, workspaceId = null, dryRun = false, tickIntervalMinutes, pin;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
     else if (argv[i] === '--dry-run') dryRun = true;
@@ -77,13 +79,20 @@ export function main(argv) {
       }
       tickIntervalMinutes = n;
     }
+    else if (argv[i] === '--pin') {
+      pin = argv[++i];
+      if (!/^\d{6}$/.test(pin)) {
+        process.stderr.write('--pin must be a 6-digit string\n');
+        return 2;
+      }
+    }
     else if (!argv[i].startsWith('--')) message = argv[i];
   }
-  if (!message) { process.stderr.write('usage: collab-kickoff.mjs "<message>" [--workspace-id <id>] [--tick-interval-minutes <n>] [--dry-run]\n'); return 2; }
-  kickoff(message, { workspaceId, dryRun, tickIntervalMinutes })
+  if (!message) { process.stderr.write('usage: collab-kickoff.mjs "<message>" [--workspace-id <id>] [--tick-interval-minutes <n>] [--pin <6-digits>] [--dry-run]\n'); return 2; }
+  kickoff(message, { workspaceId, dryRun, tickIntervalMinutes, pin })
     .then(r => {
       const cadenceMin = tickIntervalMinutes ?? 30;
-      process.stdout.write(`Kickoff: ${r.slug}\nStart: /loop ${cadenceMin}m /collab "look at slug ${r.slug}"\n`);
+      process.stdout.write(`Kickoff: ${r.slug}\nPIN: ${r.pin}  (your manual-entry shorthand; agents still use the slug)\nStart: /loop ${cadenceMin}m /collab "look at slug ${r.slug}"\nOr (your shorthand): /collab ${r.pin}\n`);
     })
     .catch(e => { process.stderr.write(`kickoff error: ${e.message}\n`); process.exit(1); });
 }

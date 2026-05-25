@@ -42,6 +42,10 @@ export function validateEvents(events) {
       if (typeof tim !== 'number' || !Number.isFinite(tim) || tim < 1 || tim > 1440)
         errors.push(`${tag} kickoff tick_interval_minutes must be a number between 1 and 1440 (got: ${tim})`);
     }
+    if (e.type === 'kickoff' && e.payload?.pin != null) {
+      if (typeof e.payload.pin !== 'string' || !/^\d{6}$/.test(e.payload.pin))
+        errors.push(`${tag} kickoff pin must be a 6-digit string (got: ${e.payload.pin})`);
+    }
     if (i > 0 && e.ts && events[i-1].ts) {
       if (Math.abs(new Date(e.ts) - new Date(events[i-1].ts)) > 3600000)
         warnings.push(`${tag} clock skew >1h from ${events[i-1].event_id}`);
