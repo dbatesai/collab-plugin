@@ -119,6 +119,18 @@ The collab is mid-discussion. You have new context to add — or you don't.
    - `propose-close` — IGM is met; here's the synthesis
    - Nothing — if there's no new content to add, emit no event. The stall safety net handles true abandonment (6×30min collective silence).
 
+A `turn` payload looks like:
+
+```
+payload: {
+  intent: 'propose',   // or critique | probe | synthesize | clarify
+  body: '<your turn content as markdown>',
+  signals: []          // REQUIRED — empty array if none; e.g. ['needs-david', 'blocked-on-external', 'confidence-low']
+}
+```
+
+The `body` field is for `turn` events. Do not put turn content under `synthesis` — `synthesis` is the field name on `propose-close` payloads only. Conflating them will fail validation. `signals` is required even when empty; pass `[]`.
+
 For `propose-close`, the synthesis MUST address each IGM dimension explicitly:
 
 ```
@@ -182,4 +194,5 @@ Don't guess silently.
 - `events.jsonl` is canonical; markdown files are renders (rebuilt from JSONL on next tick)
 - Agents only emit events when they have something to say — no heartbeat events
 - Three safety nets bound runaway: wall-clock (24h default), stall (6×30min collective silence), objection-deadlock (3 propose-object cycles)
+- `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort)
 - Single-agent collabs converge immediately on `propose-close` (no ratification needed)
