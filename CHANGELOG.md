@@ -17,3 +17,9 @@ Versioning: [SemVer](https://semver.org/).
 - `references/capabilities.md`: starter capability vocabulary.
 - `references/igm-derivation.md`: IGM inference template.
 - CI: syntax check, manifest validation, harness lockstep, SKILL.md frontmatter, unit tests.
+- Phase 2: `collab-route.mjs` deterministic message-routing (DC-77).
+- Phase 2: SKILL.md rewritten as agent operating manual with per-route algorithms.
+- Phase 2: Single-agent immediate-convergence regression test.
+
+### Changed
+- Phase 2: `collab-tick.mjs` refactored — `tick()` renamed to `tickDeterministic()`; LLM stubs removed; LLM-decision routes exit with `{action: 'agent-decision-needed', route, ...}` hint for the agent to consume per SKILL.md algorithm.
