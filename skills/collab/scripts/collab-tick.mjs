@@ -26,8 +26,10 @@ export function detectRoute(events, triplet, nowTs) {
   if (isClosed(events)) return 'closed';
   const net = checkSafetyNets(events, nowTs);
   if (net) return `safety-net:${net}`;
-  const ratStatus = getRatificationStatus(events);
-  if (ratStatus) {
+  const ratStatus = getRatificationStatus(events, nowTs);
+  // Treat objected propose-closes as dead (findActiveProposeClose semantics).
+  // The ratStatus still reports them for visibility, but tick routing skips them.
+  if (ratStatus && ratStatus.objected.length === 0) {
     if (ratStatus.converged && ratStatus.proposeClose.author === triplet) return 'emit-close';
     if (ratStatus.proposeClose.author !== triplet && ratStatus.pending.includes(triplet)) return 'ratify-or-object';
   }
@@ -74,7 +76,7 @@ export async function tickDeterministic(slug, options = {}) {
   }
 
   if (route === 'emit-close') {
-    const rat = getRatificationStatus(events);
+    const rat = getRatificationStatus(events, nowTs);
     const ev = {
       event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: 'close',
       references: [rat.proposeClose.event_id],

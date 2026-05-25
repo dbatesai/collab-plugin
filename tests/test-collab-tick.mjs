@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { SILENCE_RATIFY_MS, TICK_INTERVAL_MS } from '../skills/collab/scripts/collab-event-helpers.mjs';
 
 let checkSafetyNets, getRatificationStatus, hasJoined;
 let detectRoute;
@@ -80,4 +81,81 @@ test('single-agent: propose-close is immediately converged (no others to ratify)
   assert.ok(status, 'expected ratification status object');
   assert.equal(status.converged, true, 'single-agent should converge immediately');
   assert.equal(status.otherAgents.length, 0, 'no other agents');
+});
+
+// --- silence-as-ratification (finding #7) ---
+
+const PROPOSE_TS = '2026-05-25T10:00:00Z';
+const SILENT_AGENT = 'silent@cc:m2';
+const ACTIVE_AGENT = 'active@cc:m3';
+
+function buildProposeCloseEvents() {
+  return [
+    { event_id:'evt-001', ts:'2026-05-25T09:00:00Z', author:'orig@cc:m1', slug:'s', type:'kickoff', references:[],
+      payload:{ message:'t', igm:{intention:'i',goal:'g',measure:'m'}, capabilities_wanted:[], wall_clock_hours:24 } },
+    { event_id:'evt-002', ts:'2026-05-25T09:00:00Z', author:'orig@cc:m1', slug:'s', type:'join', references:[],
+      payload:{ capability_match:[], commitment:'orig' } },
+    { event_id:'evt-003', ts:'2026-05-25T09:05:00Z', author:SILENT_AGENT, slug:'s', type:'join', references:[],
+      payload:{ capability_match:[], commitment:'will go offline' } },
+    { event_id:'evt-004', ts:'2026-05-25T09:05:00Z', author:ACTIVE_AGENT, slug:'s', type:'join', references:[],
+      payload:{ capability_match:[], commitment:'will respond' } },
+    { event_id:'evt-005', ts:PROPOSE_TS, author:'orig@cc:m1', slug:'s', type:'propose-close', references:[],
+      payload:{ synthesis:'done', igm_met:{} } },
+  ];
+}
+
+test('silence-as-ratification: not yet eligible (within window)', () => {
+  const events = buildProposeCloseEvents();
+  // 30 min after propose-close — under SILENCE_RATIFY_MS (90min)
+  const r = getRatificationStatus(events, '2026-05-25T10:30:00Z');
+  assert.equal(r.converged, false);
+  assert.deepEqual(r.implicitRatified, [], 'no implicit ratification before window elapses');
+  assert.deepEqual(r.pending.sort(), [SILENT_AGENT, ACTIVE_AGENT].sort());
+});
+
+test('silence-as-ratification: eligible, silent agents auto-ratified', () => {
+  const events = buildProposeCloseEvents();
+  // 91 min after propose-close — past SILENCE_RATIFY_MS
+  const r = getRatificationStatus(events, '2026-05-25T11:31:00Z');
+  assert.equal(r.converged, true, 'should converge when all pending agents have been silent past window');
+  assert.deepEqual(r.implicitRatified.sort(), [SILENT_AGENT, ACTIVE_AGENT].sort());
+  assert.deepEqual(r.pending, []);
+});
+
+test('silence-as-ratification: agent emitted a turn since propose-close → still pending', () => {
+  const events = buildProposeCloseEvents();
+  events.push({ event_id:'evt-006', ts:'2026-05-25T10:30:00Z', author:ACTIVE_AGENT, slug:'s', type:'turn',
+    references:['evt-005'], payload:{ intent:'critique', body:'wait', signals:[] } });
+  // 91 min after propose-close
+  const r = getRatificationStatus(events, '2026-05-25T11:31:00Z');
+  // ACTIVE_AGENT emitted an event since propose-close → still pending (NOT silent)
+  // SILENT_AGENT emitted nothing → implicitly ratified
+  assert.deepEqual(r.implicitRatified, [SILENT_AGENT]);
+  assert.ok(r.pending.includes(ACTIVE_AGENT), 'agent with activity is still pending');
+  assert.equal(r.converged, false);
+});
+
+test('silence-as-ratification: explicit ratify still works alongside implicit', () => {
+  const events = buildProposeCloseEvents();
+  events.push({ event_id:'evt-006', ts:'2026-05-25T10:05:00Z', author:ACTIVE_AGENT, slug:'s', type:'ratify',
+    references:['evt-005'], payload:{ agreement_notes:'agreed' } });
+  // 91 min after propose-close
+  const r = getRatificationStatus(events, '2026-05-25T11:31:00Z');
+  assert.deepEqual(r.explicitRatified, [ACTIVE_AGENT]);
+  assert.deepEqual(r.implicitRatified, [SILENT_AGENT]);
+  assert.deepEqual(r.ratified.sort(), [ACTIVE_AGENT, SILENT_AGENT].sort());
+  assert.equal(r.converged, true);
+});
+
+test('silence-as-ratification: explicit object blocks convergence even with silence elapsed', () => {
+  const events = buildProposeCloseEvents();
+  events.push({ event_id:'evt-006', ts:'2026-05-25T10:05:00Z', author:ACTIVE_AGENT, slug:'s', type:'object',
+    references:['evt-005'], payload:{ reason:'not done' } });
+  const r = getRatificationStatus(events, '2026-05-25T11:31:00Z');
+  assert.deepEqual(r.objected, [ACTIVE_AGENT]);
+  assert.equal(r.converged, false, 'objection blocks even with silence elapsed');
+});
+
+test('SILENCE_RATIFY_MS constant exported and equals 3*TICK_INTERVAL_MS', () => {
+  assert.equal(SILENCE_RATIFY_MS, 3 * TICK_INTERVAL_MS);
 });

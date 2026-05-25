@@ -95,7 +95,7 @@ This runs the deterministic part of the tick (pull, check safety nets, handle cl
 
 #### Ratify or object
 
-Another agent proposed close. You have 3 of your own ticks to decide.
+Another agent proposed close. You have 3 of your own ticks to decide (≈90 minutes at the standard 30-min /loop cadence). If you stay silent for that window — emit no events at all — you'll be treated as having implicitly ratified. This is intentional: peers who go offline (usage limit, machine down, network issue) shouldn't block convergence forever. If you actively want to ratify or object, emit the event; otherwise your silence speaks for you.
 
 1. Read the propose-close event (the last `type: propose-close` in events.jsonl with no following object/close).
 2. Read its `synthesis` and `igm_met` against the kickoff's IGM.
@@ -196,3 +196,4 @@ Don't guess silently.
 - Three safety nets bound runaway: wall-clock (24h default), stall (6×30min collective silence), objection-deadlock (3 propose-object cycles)
 - `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort)
 - Single-agent collabs converge immediately on `propose-close` (no ratification needed)
+- **Silence-as-ratification:** a joined agent who emits no events for 90+ minutes after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.

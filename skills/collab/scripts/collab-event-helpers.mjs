@@ -19,6 +19,7 @@ export const COLLABS_DIR = join(FILES_REPO, 'collabs');
 export const TICK_INTERVAL_MS = 30 * 60 * 1000;
 export const STALL_TICKS = 6;
 export const MAX_OBJECTION_CYCLES = 3;
+export const SILENCE_RATIFY_MS = 3 * TICK_INTERVAL_MS; // 90 minutes — 3 ticks at 30-min cadence
 
 // --- Slug ---
 
@@ -160,17 +161,53 @@ export function checkSafetyNets(events, nowTs) {
   return null;
 }
 
-export function getRatificationStatus(events) {
-  const proposeClose = findActiveProposeClose(events);
+export function getRatificationStatus(events, nowTs) {
+  // Find the latest propose-close (not nullified by a subsequent object — that's
+  // findActiveProposeClose's job; here we still want to report ratification state
+  // so callers can see who objected and what state the propose-close ended in).
+  // A subsequent 'close' event does nullify (collab is over).
+  let proposeClose = null;
+  for (const e of events) {
+    if (e.type === 'propose-close') proposeClose = e;
+    if (e.type === 'close') proposeClose = null;
+  }
   if (!proposeClose) return null;
   const joined = getJoinedAgents(events);
   const others = joined.filter(a => a !== proposeClose.author);
   const proposeIdx = events.findIndex(e => e.event_id === proposeClose.event_id);
   const after = events.slice(proposeIdx + 1);
-  const ratified = new Set(after.filter(e => e.type === 'ratify').map(e => e.author));
+  const explicitRatified = new Set(after.filter(e => e.type === 'ratify').map(e => e.author));
   const objected = new Set(after.filter(e => e.type === 'object').map(e => e.author));
-  const pending = others.filter(a => !ratified.has(a) && !objected.has(a));
-  return { proposeClose, otherAgents: others, ratified: [...ratified], objected: [...objected], pending, converged: pending.length === 0 && objected.size === 0 };
+
+  // Silence-as-ratification: any agent who has emitted no events since propose-close
+  // AND wall-clock has exceeded SILENCE_RATIFY_MS is treated as implicitly ratified.
+  const now = new Date(nowTs || new Date().toISOString());
+  const proposeTs = new Date(proposeClose.ts);
+  const silenceElapsed = now - proposeTs;
+  const eligibleForSilenceRatify = silenceElapsed > SILENCE_RATIFY_MS;
+
+  const implicitRatified = new Set();
+  if (eligibleForSilenceRatify) {
+    for (const agent of others) {
+      if (explicitRatified.has(agent) || objected.has(agent)) continue;
+      // Has this agent emitted ANY event since propose-close?
+      const agentEventsSince = after.some(e => e.author === agent);
+      if (!agentEventsSince) implicitRatified.add(agent);
+    }
+  }
+
+  const allRatified = new Set([...explicitRatified, ...implicitRatified]);
+  const pending = others.filter(a => !allRatified.has(a) && !objected.has(a));
+  return {
+    proposeClose,
+    otherAgents: others,
+    ratified: [...allRatified],          // explicit + implicit combined
+    explicitRatified: [...explicitRatified],
+    implicitRatified: [...implicitRatified],
+    objected: [...objected],
+    pending,
+    converged: pending.length === 0 && objected.size === 0,
+  };
 }
 
 // --- Git transport ---
