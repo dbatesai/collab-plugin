@@ -4,7 +4,8 @@
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { findCollabDir, readEvents, getJoinedAgents, isClosed, findActiveProposeClose, checkSafetyNets } from './collab-event-helpers.mjs';
+import { findCollabDir, findCollabAcrossTransports, readEvents, getJoinedAgents, isClosed, findActiveProposeClose, checkSafetyNets } from './collab-event-helpers.mjs';
+import { resolveTransportPaths } from './transport.mjs';
 
 export function printStatus(events, slug) {
   const kickoff = events.find(e => e.type === 'kickoff');
@@ -29,9 +30,27 @@ export function printStatus(events, slug) {
 }
 
 export function main(argv) {
-  const slug = argv[0];
-  if (!slug) { process.stderr.write('usage: collab-status.mjs <slug>\n'); return 2; }
-  const dir = findCollabDir(slug);
+  let slug = null, transport = null;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--transport') transport = argv[++i];
+    else if (!argv[i].startsWith('--') && slug === null) slug = argv[i];
+  }
+  if (!slug) { process.stderr.write('usage: collab-status.mjs <slug> [--transport <id>]\n'); return 2; }
+
+  let dir;
+  if (transport) {
+    // Explicit transport: resolve directly. Need to find the date-prefixed dir name.
+    const hit = findCollabAcrossTransports(slug);
+    if (!hit || hit.transport !== transport) {
+      process.stderr.write(`no collab "${slug}" in transport "${transport}"\n`);
+      return 2;
+    }
+    dir = hit.dir;
+  } else {
+    // Auto-resolve: slugs are unique across transports per §6.3.
+    const hit = findCollabAcrossTransports(slug);
+    dir = hit ? hit.dir : findCollabDir(slug); // fall back to legacy scanner if cross-transport miss
+  }
   if (!dir) { process.stderr.write(`no collab: ${slug}\n`); return 2; }
   printStatus(readEvents(dir), slug);
   return 0;
