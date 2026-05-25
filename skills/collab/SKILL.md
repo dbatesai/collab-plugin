@@ -1,13 +1,13 @@
 ---
 name: collab
-description: "Autonomous multi-agent collaboration. Single /collab <message> command routes by message + state into five paths — kickoff, join, tick, status, abort. Structured JSONL events on git transport at ~/Documents/Projects/files/collabs/. Cross-machine + cross-harness. Requires core-plugin."
+description: "Autonomous multi-agent collaboration. Single /collab <message> command routes by message + state into five paths — kickoff, join, tick, status, abort. Structured JSONL events on two transports — localhost (~/.collab/local/) for same-machine; github:<repo> for cross-machine. Cross-machine + cross-harness. Requires core-plugin."
 ---
 
 # collab
 
 ## What this skill does
 
-When a user types `/collab <message>`, route the message + state to one of five actions: **kickoff**, **join**, **tick**, **status**, or **abort**. All collab state lives in `~/Documents/Projects/files/collabs/<YYYY-MM-DD>-<slug>/events.jsonl` (canonical) with rendered `STATUS.md` and `turns/*.md` files.
+When a user types `/collab <message>`, route the message + state to one of five actions: **kickoff**, **join**, **tick**, **status**, or **abort**. All collab state lives in `<collab-dir>/events/` (canonical, one event per file) with rendered `STATUS.md`, `events.jsonl`, and `turns/*.md` files. The `<collab-dir>` location depends on transport: `~/Documents/Projects/<repo>/collabs/<YYYY-MM-DD>-<slug>/` for `github:<repo>`, `~/.collab/local/<YYYY-MM-DD>-<slug>/` for `localhost`. See "Choosing a transport" below.
 
 **Path variable:** Script examples below use `${COLLAB_PLUGIN_ROOT}`. Substitute the actual path for your harness: `${COLLAB_PLUGIN_ROOT}` on Claude Code, `${CODEX_PLUGIN_ROOT}` on Codex, `${GEMINI_PLUGIN_ROOT}` on Gemini CLI.
 
@@ -21,7 +21,9 @@ Run the deterministic routing script:
 node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "<message>" --workspace-id <workspace_id>
 ```
 
-Output is JSON: `{ route, slug?, extractedSlug?, triplet }`.
+Output is JSON: `{ route, slug?, extractedSlug?, transport, triplet }`.
+
+The route script extracts a leading transport token (`localhost` or `github:<repo>`) from the message before slug derivation. The result JSON now includes a `transport` field. If David's command includes the transport prefix (`/collab localhost discuss xyz`), the route returns that transport. If omitted, the default is `github:files` — preserves v0.1.x behavior.
 
 - `route: "kickoff"` — no slug referenced, message describes new work
 - `route: "join"` — message references a known active slug; agent hasn't joined yet
@@ -32,19 +34,56 @@ Output is JSON: `{ route, slug?, extractedSlug?, triplet }`.
 
 **PINs (David's manual-entry shorthand).** A kickoff event stores a 6-digit `pin` in its payload so David can refer to a collab by `/collab 654321` instead of typing the full slug. The route script resolves a bare 6-digit number to the corresponding full slug before action detection. **Agents always communicate by slug** — in event payloads, in messages to peers, in status reports. The PIN exists solely so David can start an agent on a topic with minimal typing; the slug is the canonical identifier from that point on.
 
+## Choosing a transport
+
+| Situation | Use |
+|---|---|
+| All participants on the same machine (same Mac) | `localhost` |
+| Any participant on a different machine | `github:<repo>` (typically `github:files`) |
+| Cross-harness on the same machine (HK + Gemini + Codex on this M5) | `localhost` |
+| Cross-machine collab (HK on M5 + WK on M4) | `github:files` |
+
+Localhost runs at faster cadence (default 2 minutes) because there's no git round-trip. Use `--tick-interval-minutes 1` on kickoff for high-stakes adversarial review where objections need to land within a minute.
+
+The transport is set at kickoff and cannot change for the lifetime of the collab. If any participant is remote, choose `github:<repo>` at kickoff — a `localhost` collab cannot accept remote joins.
+
+David might type either form of any route — with the transport prefix or without. The route script accepts both:
+
+```
+/collab discuss the architecture                    # kickoff, defaults to github:files
+/collab localhost discuss the architecture          # kickoff, localhost
+
+/collab look at slug memory-arch                    # join (or tick), auto-resolves transport from disk
+/collab localhost look at slug memory-arch          # join (or tick), explicit transport
+
+/collab status of slug memory-arch                  # status, auto-resolves
+/collab github:files status of slug memory-arch     # status, explicit
+
+/collab abort slug memory-arch                      # abort, auto-resolves
+/collab localhost abort slug memory-arch            # abort, explicit
+```
+
+The prefix only matters at kickoff. On join, tick, status, and abort, the route script resolves the transport from disk by finding the slug across all known transports — so the prefix is informational and can be omitted.
+
 ## Step 2: Execute the route
 
 ### Route: kickoff
 
 ```bash
-node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--tick-interval-minutes <n>] [--pin <6-digits>]
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--transport <localhost|github:<repo>>] [--tick-interval-minutes <n>] [--pin <6-digits>] [--ratification-window-minutes <n>] [--min-version <semver>]
 ```
 
-This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits, and pushes. Stdout reports the slug, the auto-generated 6-digit PIN (David's manual-entry shorthand), and the recommended `/loop` command at the chosen cadence.
+This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits (on git transports), and pushes. Stdout reports the slug, the auto-generated 6-digit PIN (David's manual-entry shorthand), the transport, and the recommended `/loop` command at the chosen cadence.
+
+Pass the route's `transport` field through as `--transport`. If David's message had no transport prefix, the route returns `github:files` (v0.1.x behavior) — pass that through.
 
 `--pin <6-digits>` (optional) lets the caller supply a specific PIN instead of generating one randomly; useful for testing or when David has a preferred number to remember.
 
-`--tick-interval-minutes <n>` (optional; default 30) sets the per-collab tick cadence. Two safety nets scale with it: the stall threshold (6 × tick) and the silence-as-ratification window (3 × tick). Use `5` for localhost-pattern rapid iteration on a single machine; keep the default `30` for cross-machine or multi-day collabs where peers may be intermittent. Valid range: 1–1440.
+`--tick-interval-minutes <n>` (optional) sets the per-collab tick cadence. Default is 30 for `github:<repo>` and 2 for `localhost`. Two safety nets scale with it: the stall threshold (6 × tick) and the silence-as-ratification window (3 × tick). Valid range: 1–1440.
+
+`--ratification-window-minutes <n>` (optional) decouples the silence-as-ratification window from the tick cadence. Default is `3 × tick` for git transports and `max(3 × tick, 30)` for localhost — the 30-minute floor on localhost prevents a 1-minute tick from collapsing the ratification window to 3 minutes.
+
+`--min-version <semver>` (optional; default `0.2.0`) sets the minimum collab-plugin version a joining agent must run. Any v0.2 agent joins fine; older agents are rejected at the join check. Bump above `0.2.0` only when a kickoff relies on a feature shipped in a later patch.
 
 **If the placeholder IGM is too vague**, edit `events.jsonl` to refine the kickoff event's `igm.measure` field before the next tick — but only the originator should refine, and only before any other agent has joined. After that, refine via a `turn` event with intent `clarify`.
 
@@ -54,13 +93,13 @@ Then start the loop so the collab runs autonomously, using the cadence printed b
 /loop <n>m /collab "look at slug <slug>"
 ```
 
-Tell the user: "Kicked off slug `<slug>`. To bring other agents in, tell them: *look at slug `<slug>` in the files repo.*"
+Tell the user: "Kicked off slug `<slug>`. To bring other agents in, tell them: *look at slug `<slug>` in the files repo.*" For a localhost collab, instruct the other agents to run `/collab localhost look at slug <slug>` — the transport prefix is needed because there's no files repo for them to scan.
 
 ### Route: join
 
 You already have the slug from the route output. Now decide:
 
-1. Read the collab directory: `~/Documents/Projects/files/collabs/<YYYY-MM-DD>-<slug>/KICKOFF.md`
+1. Read the collab directory: `~/Documents/Projects/files/collabs/<YYYY-MM-DD>-<slug>/KICKOFF.md` for git transports, or `~/.collab/local/<YYYY-MM-DD>-<slug>/KICKOFF.md` for localhost. The `transport` field in the route output tells you which.
 2. Read your capabilities: `<workspace>/_collab/capabilities.yaml`
 3. Compare `capabilities_wanted` (from kickoff event) against your capabilities. Treat as a hint, not a gate.
 4. Reason about fit: *"Do I have something useful to add, or would I just be agreeing?"*
@@ -199,10 +238,11 @@ Don't guess silently.
 
 ## Architecture invariants
 
-- `events.jsonl` is canonical; markdown files are renders (rebuilt from JSONL on next tick)
+- Per-event files under `events/` are canonical; `events.jsonl` and markdown files are renders (rebuilt from `events/` on next tick)
+- Transport is set at kickoff and immutable for the collab's lifetime. `localhost` keeps state at `~/.collab/local/`; `github:<repo>` at `~/Documents/Projects/<repo>/collabs/`. Slugs are unique across all transports.
 - Agents only emit events when they have something to say — no heartbeat events
 - Three safety nets bound runaway: wall-clock (24h default), stall (6 × tick cadence collective silence), objection-deadlock (3 propose-object cycles)
-- **Safety nets scale with the kickoff's `tick_interval_minutes`** (default 30): a 5-min-cadence collab stalls at 30 min of silence and treats 15 min of post-propose-close silence as implicit ratification; a 30-min-cadence collab stalls at 3 hours and ratifies silence at 90 min. The kickoff event is the source of truth; safety-net thresholds are computed from it per tick.
+- **Safety nets scale with the kickoff's `tick_interval_minutes`** (default 30 on git, 2 on localhost): a 5-min-cadence collab stalls at 30 min of silence and treats 15 min of post-propose-close silence as implicit ratification; a 30-min-cadence collab stalls at 3 hours and ratifies silence at 90 min. The kickoff event is the source of truth; safety-net thresholds are computed from it per tick. `ratification_window_minutes` can be set independently on kickoff; localhost has a 30-min floor.
 - `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort)
 - Single-agent collabs converge immediately on `propose-close` (no ratification needed)
-- **Silence-as-ratification:** a joined agent who emits no events for 3 × tick-cadence after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.
+- **Silence-as-ratification:** a joined agent who emits no events for the ratification window after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.
