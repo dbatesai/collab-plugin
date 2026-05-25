@@ -31,14 +31,19 @@ const SLUG_PATTERNS = [
 const ABORT_RE = /\b(abort|cancel)\b/i;
 const STATUS_RE = /\b(status|happening|what'?s\s+happening|how is)\b/i;
 
-const VERB_PREFIX_RE = /^(look at|talk about|discuss|review|join|status of|abort|cancel)\s+/i;
+// Discourse verbs are safe to strip during transport extraction; routing verbs
+// (abort, cancel, status of) must remain in `rest` so detectAction's ABORT_RE /
+// STATUS_RE checks still fire. We peek past routing verbs to find a trailing
+// transport token, then prepend the routing verb back into `rest`.
+const DISCOURSE_VERB_PREFIX_RE = /^(look at|talk about|discuss|review|join)\s+/i;
+const ROUTING_VERB_PREFIX_RE = /^(abort|cancel|status of)\s+/i;
 const TRANSPORT_TOKEN_RE = /^(localhost|github:[a-z0-9_-]+)\s+/i;
 
 /**
- * extractTransport — peel off an optional leading verb prefix, then an optional
- * leading transport token. The verb prefix is only consumed when a transport
- * token follows; otherwise the original message is returned untouched so the
- * downstream slug-pattern matcher can still see the verb (e.g. 'look at X').
+ * extractTransport — peel off an optional leading discourse-verb prefix, then
+ * (without consuming it) peek past any routing-verb prefix to detect a transport
+ * token. Routing verbs are preserved in `rest` so detectAction can still route
+ * abort/cancel/status correctly.
  *
  * Returns { transport, rest }.
  *
@@ -46,24 +51,19 @@ const TRANSPORT_TOKEN_RE = /^(localhost|github:[a-z0-9_-]+)\s+/i;
  *   'localhost discuss memory'              → { transport: 'localhost', rest: 'discuss memory' }
  *   'github:files look at slug X'           → { transport: 'github:files', rest: 'look at slug X' }
  *   'look at localhost slug X'              → { transport: 'localhost', rest: 'slug X' }
- *   'discuss the architecture'              → { transport: null, rest: 'discuss the architecture' }
+ *   'abort localhost slug X'                → { transport: 'localhost', rest: 'abort slug X' }
+ *   'status of github:files slug Y'         → { transport: 'github:files', rest: 'status of slug Y' }
+ *   'discuss the architecture'              → { transport: null, rest: 'the architecture' }
  *   'localhost' (no trailing space)         → { transport: null, rest: 'localhost' }
  */
 export function extractTransport(rawMessage) {
-  // First try: transport at the very start (no verb prefix).
-  let m = rawMessage.match(TRANSPORT_TOKEN_RE);
-  if (m) return { transport: m[1].toLowerCase(), rest: rawMessage.slice(m[0].length) };
-
-  // Second try: verb prefix + transport. Strip both together.
-  const verbMatch = rawMessage.match(VERB_PREFIX_RE);
-  if (verbMatch) {
-    const afterVerb = rawMessage.slice(verbMatch[0].length);
-    m = afterVerb.match(TRANSPORT_TOKEN_RE);
-    if (m) return { transport: m[1].toLowerCase(), rest: afterVerb.slice(m[0].length) };
-  }
-
-  // No transport token anywhere at the head — leave the message untouched.
-  return { transport: null, rest: rawMessage };
+  const afterDiscourse = rawMessage.replace(DISCOURSE_VERB_PREFIX_RE, '');
+  const routingMatch = afterDiscourse.match(ROUTING_VERB_PREFIX_RE);
+  const routingPrefix = routingMatch ? routingMatch[0] : '';
+  const afterRouting = routingPrefix ? afterDiscourse.slice(routingPrefix.length) : afterDiscourse;
+  const m = afterRouting.match(TRANSPORT_TOKEN_RE);
+  if (!m) return { transport: null, rest: afterDiscourse }; // routing verb (if any) stays in rest naturally
+  return { transport: m[1].toLowerCase(), rest: routingPrefix + afterRouting.slice(m[0].length) };
 }
 
 export function extractSlug(message) {

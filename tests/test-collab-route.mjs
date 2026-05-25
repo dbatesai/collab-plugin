@@ -95,8 +95,10 @@ test('extractTransport handles verb prefix before transport', () => {
 });
 
 test('extractTransport defaults to null when no token present', () => {
+  // Discourse verb 'discuss' is stripped (safe — carries no routing info);
+  // transport stays null since no transport token follows.
   const r = extractTransport('discuss the architecture');
-  assert.deepEqual(r, { transport: null, rest: 'discuss the architecture' });
+  assert.deepEqual(r, { transport: null, rest: 'the architecture' });
 });
 
 test('extractTransport consumes only one transport token', () => {
@@ -109,9 +111,38 @@ test('extractTransport handles bare "localhost" with no trailing space', () => {
   assert.deepEqual(r, { transport: null, rest: 'localhost' });
 });
 
-test('extractTransport handles "abort localhost slug X" — verb prefix swallows abort, transport extracts', () => {
-  const r = extractTransport('abort localhost slug memory-arch');
-  assert.deepEqual(r, { transport: 'localhost', rest: 'slug memory-arch' });
+test('extractTransport preserves abort/cancel/status verbs (routing-relevant)', () => {
+  // Routing verbs must survive transport extraction so detectAction can see them.
+  assert.deepEqual(extractTransport('abort localhost slug memory-arch'), { transport: 'localhost', rest: 'abort slug memory-arch' });
+  assert.deepEqual(extractTransport('cancel github:files slug X'), { transport: 'github:files', rest: 'cancel slug X' });
+  assert.deepEqual(extractTransport('status of localhost slug Y'), { transport: 'localhost', rest: 'status of slug Y' });
+});
+
+test('abort routes correctly when paired with explicit transport (regression: T6 verb-strip)', () => {
+  const state = {
+    byTransport: {
+      'localhost': { existsActive: new Set(['memory-arch']), existsClosed: new Set(), joined: new Set(['memory-arch']) },
+    },
+    pinIndex: new Map(),
+  };
+  const { transport, rest } = extractTransport('abort localhost slug memory-arch');
+  const r = detectAction(rest, state, transport);
+  assert.equal(r.route, 'abort');
+  assert.equal(r.transport, 'localhost');
+  assert.equal(r.slug, 'memory-arch');
+});
+
+test('status routes correctly when paired with explicit transport', () => {
+  const state = {
+    byTransport: {
+      'github:files': { existsActive: new Set(['memory-arch']), existsClosed: new Set(), joined: new Set() },
+    },
+    pinIndex: new Map(),
+  };
+  const { transport, rest } = extractTransport('status of github:files slug memory-arch');
+  const r = detectAction(rest, state, transport);
+  assert.equal(r.route, 'status');
+  assert.equal(r.transport, 'github:files');
 });
 
 test('detectAction with no explicit transport defaults to github:files', () => {
