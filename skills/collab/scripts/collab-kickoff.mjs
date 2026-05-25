@@ -12,8 +12,10 @@ import {
   deriveTriplet, gitPullRebase, gitCommitPush,
 } from './collab-event-helpers.mjs';
 
-export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24) {
-  return { message, igm, capabilities_wanted: capabilitiesWanted, wall_clock_hours: wallClockHours };
+export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes) {
+  const payload = { message, igm, capabilities_wanted: capabilitiesWanted, wall_clock_hours: wallClockHours };
+  if (typeof tickIntervalMinutes === 'number') payload.tick_interval_minutes = tickIntervalMinutes;
+  return payload;
 }
 
 export function buildSelfJoinPayload(capabilityMatch, commitment) {
@@ -39,7 +41,7 @@ export function buildKickoffMd(slug, message, igm, capabilitiesWanted, author) {
 }
 
 export async function kickoff(message, options = {}) {
-  const { workspaceId = 'unknown', dryRun = false, wallClockHours = 24, capabilitiesWanted = [] } = options;
+  const { workspaceId = 'unknown', dryRun = false, wallClockHours = 24, capabilitiesWanted = [], tickIntervalMinutes } = options;
   if (!dryRun) gitPullRebase();
 
   const slug = deriveSlug(message);
@@ -51,7 +53,7 @@ export async function kickoff(message, options = {}) {
   writeFileSync(join(dir, 'KICKOFF.md'), buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet));
 
   const kickoffEvt = { event_id:'evt-001', ts:nowTs, author:triplet, slug, type:'kickoff', references:[],
-    payload: buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours) };
+    payload: buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours, tickIntervalMinutes) };
   appendEvent(dir, kickoffEvt);
 
   const joinEvt = { event_id:'evt-002', ts:nowTs, author:triplet, slug, type:'join', references:['evt-001'],
@@ -63,15 +65,26 @@ export async function kickoff(message, options = {}) {
 }
 
 export function main(argv) {
-  let message = null, workspaceId = null, dryRun = false;
+  let message = null, workspaceId = null, dryRun = false, tickIntervalMinutes;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
     else if (argv[i] === '--dry-run') dryRun = true;
+    else if (argv[i] === '--tick-interval-minutes') {
+      const n = Number(argv[++i]);
+      if (!Number.isFinite(n) || n <= 0 || n > 1440) {
+        process.stderr.write('--tick-interval-minutes must be a positive number, 1–1440\n');
+        return 2;
+      }
+      tickIntervalMinutes = n;
+    }
     else if (!argv[i].startsWith('--')) message = argv[i];
   }
-  if (!message) { process.stderr.write('usage: collab-kickoff.mjs "<message>" [--workspace-id <id>] [--dry-run]\n'); return 2; }
-  kickoff(message, { workspaceId, dryRun })
-    .then(r => process.stdout.write(`Kickoff: ${r.slug}\nStart: /loop 30m /collab "look at slug ${r.slug}"\n`))
+  if (!message) { process.stderr.write('usage: collab-kickoff.mjs "<message>" [--workspace-id <id>] [--tick-interval-minutes <n>] [--dry-run]\n'); return 2; }
+  kickoff(message, { workspaceId, dryRun, tickIntervalMinutes })
+    .then(r => {
+      const cadenceMin = tickIntervalMinutes ?? 30;
+      process.stdout.write(`Kickoff: ${r.slug}\nStart: /loop ${cadenceMin}m /collab "look at slug ${r.slug}"\n`);
+    })
     .catch(e => { process.stderr.write(`kickoff error: ${e.message}\n`); process.exit(1); });
 }
 

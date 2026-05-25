@@ -16,10 +16,10 @@ import { fileURLToPath } from 'node:url';
 
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
 export const COLLABS_DIR = join(FILES_REPO, 'collabs');
-export const TICK_INTERVAL_MS = 30 * 60 * 1000;
+export const TICK_INTERVAL_MS = 30 * 60 * 1000; // default 30 min; per-collab override via kickoff payload's tick_interval_minutes
 export const STALL_TICKS = 6;
 export const MAX_OBJECTION_CYCLES = 3;
-export const SILENCE_RATIFY_MS = 3 * TICK_INTERVAL_MS; // 90 minutes — 3 ticks at 30-min cadence
+export const SILENCE_RATIFY_MS = 3 * TICK_INTERVAL_MS; // default 90 min — 3 ticks at 30-min cadence; scaled per-collab below
 
 // --- Slug ---
 
@@ -140,6 +140,19 @@ export function findActiveProposeClose(events) {
   return active;
 }
 
+// Per-collab tick cadence. Reads `tick_interval_minutes` from the kickoff event's
+// payload; falls back to the default TICK_INTERVAL_MS (30 min). Kickoffs without
+// the field keep v0.1.1 behavior; collabs that need faster iteration (e.g.
+// localhost-pattern or rapid spec critique) opt in by declaring it at kickoff.
+export function getTickIntervalMs(events) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const minutes = kickoff?.payload?.tick_interval_minutes;
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0) {
+    return TICK_INTERVAL_MS;
+  }
+  return minutes * 60 * 1000;
+}
+
 export function checkSafetyNets(events, nowTs) {
   const kickoff = events.find(e => e.type === 'kickoff');
   if (!kickoff) return null;
@@ -148,8 +161,9 @@ export function checkSafetyNets(events, nowTs) {
   const wallClockHours = kickoff.payload.wall_clock_hours ?? 24;
   if (now - new Date(kickoff.ts) > wallClockHours * 3600000) return 'wall-clock';
 
+  const tickMs = getTickIntervalMs(events);
   const lastEvent = events[events.length - 1];
-  if (now - new Date(lastEvent.ts) > STALL_TICKS * TICK_INTERVAL_MS) return 'stall';
+  if (now - new Date(lastEvent.ts) > STALL_TICKS * tickMs) return 'stall';
 
   let cycles = 0, inPropose = false;
   for (const e of events) {
@@ -180,11 +194,13 @@ export function getRatificationStatus(events, nowTs) {
   const objected = new Set(after.filter(e => e.type === 'object').map(e => e.author));
 
   // Silence-as-ratification: any agent who has emitted no events since propose-close
-  // AND wall-clock has exceeded SILENCE_RATIFY_MS is treated as implicitly ratified.
+  // AND wall-clock has exceeded the silence-ratify window (3 ticks at this collab's
+  // cadence) is treated as implicitly ratified.
   const now = new Date(nowTs || new Date().toISOString());
   const proposeTs = new Date(proposeClose.ts);
   const silenceElapsed = now - proposeTs;
-  const eligibleForSilenceRatify = silenceElapsed > SILENCE_RATIFY_MS;
+  const silenceRatifyMs = 3 * getTickIntervalMs(events);
+  const eligibleForSilenceRatify = silenceElapsed > silenceRatifyMs;
 
   const implicitRatified = new Set();
   if (eligibleForSilenceRatify) {

@@ -1,6 +1,6 @@
 ---
 name: collab
-description: Autonomous multi-agent collaboration. Single /collab <message> command routes by message + state into five paths: kickoff, join, tick, status, abort. Structured JSONL events on git transport at ~/Documents/Projects/files/collabs/. Cross-machine + cross-harness. Requires core-plugin.
+description: "Autonomous multi-agent collaboration. Single /collab <message> command routes by message + state into five paths — kickoff, join, tick, status, abort. Structured JSONL events on git transport at ~/Documents/Projects/files/collabs/. Cross-machine + cross-harness. Requires core-plugin."
 ---
 
 # collab
@@ -33,17 +33,19 @@ Output is JSON: `{ route, slug?, extractedSlug?, triplet }`.
 ### Route: kickoff
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id>
+node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--tick-interval-minutes <n>]
 ```
 
-This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits, and pushes. Stdout reports the slug.
+This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits, and pushes. Stdout reports the slug and the recommended `/loop` command at the chosen cadence.
+
+`--tick-interval-minutes <n>` (optional; default 30) sets the per-collab tick cadence. Two safety nets scale with it: the stall threshold (6 × tick) and the silence-as-ratification window (3 × tick). Use `5` for localhost-pattern rapid iteration on a single machine; keep the default `30` for cross-machine or multi-day collabs where peers may be intermittent. Valid range: 1–1440.
 
 **If the placeholder IGM is too vague**, edit `events.jsonl` to refine the kickoff event's `igm.measure` field before the next tick — but only the originator should refine, and only before any other agent has joined. After that, refine via a `turn` event with intent `clarify`.
 
-Then start the loop so the collab runs autonomously:
+Then start the loop so the collab runs autonomously, using the cadence printed by the kickoff script (e.g., `/loop 5m /collab "look at slug <slug>"` if you passed `--tick-interval-minutes 5`):
 
 ```
-/loop 30m /collab "look at slug <slug>"
+/loop <n>m /collab "look at slug <slug>"
 ```
 
 Tell the user: "Kicked off slug `<slug>`. To bring other agents in, tell them: *look at slug `<slug>` in the files repo.*"
@@ -75,7 +77,7 @@ await render('<slug>', { collabDir: dir, author: triplet });
 "
 ```
 
-Then start the loop: `/loop 30m /collab "look at slug <slug>"`.
+Then start the loop using the kickoff's cadence — the route script's output includes `tick_interval_minutes` (defaulting to 30 if the kickoff didn't declare one): `/loop <n>m /collab "look at slug <slug>"`.
 
 If no — emit a `decline` event with reason instead (same pattern, `type: 'decline'`, `payload: { reason: '...' }`). Don't start the loop.
 
@@ -193,7 +195,8 @@ Don't guess silently.
 
 - `events.jsonl` is canonical; markdown files are renders (rebuilt from JSONL on next tick)
 - Agents only emit events when they have something to say — no heartbeat events
-- Three safety nets bound runaway: wall-clock (24h default), stall (6×30min collective silence), objection-deadlock (3 propose-object cycles)
+- Three safety nets bound runaway: wall-clock (24h default), stall (6 × tick cadence collective silence), objection-deadlock (3 propose-object cycles)
+- **Safety nets scale with the kickoff's `tick_interval_minutes`** (default 30): a 5-min-cadence collab stalls at 30 min of silence and treats 15 min of post-propose-close silence as implicit ratification; a 30-min-cadence collab stalls at 3 hours and ratifies silence at 90 min. The kickoff event is the source of truth; safety-net thresholds are computed from it per tick.
 - `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort)
 - Single-agent collabs converge immediately on `propose-close` (no ratification needed)
-- **Silence-as-ratification:** a joined agent who emits no events for 90+ minutes after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.
+- **Silence-as-ratification:** a joined agent who emits no events for 3 × tick-cadence after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.

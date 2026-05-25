@@ -37,6 +37,11 @@ export function validateEvents(events) {
       errors.push(`${tag} turn has unknown intent: ${e.payload.intent}`);
     if (e.type === 'close' && e.payload?.outcome != null && !VALID_OUTCOMES.includes(e.payload.outcome))
       errors.push(`${tag} close has unknown outcome: ${e.payload.outcome}`);
+    if (e.type === 'kickoff' && e.payload?.tick_interval_minutes != null) {
+      const tim = e.payload.tick_interval_minutes;
+      if (typeof tim !== 'number' || !Number.isFinite(tim) || tim < 1 || tim > 1440)
+        errors.push(`${tag} kickoff tick_interval_minutes must be a number between 1 and 1440 (got: ${tim})`);
+    }
     if (i > 0 && e.ts && events[i-1].ts) {
       if (Math.abs(new Date(e.ts) - new Date(events[i-1].ts)) > 3600000)
         warnings.push(`${tag} clock skew >1h from ${events[i-1].event_id}`);

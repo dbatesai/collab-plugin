@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Autonomous multi-agent collaboration protocol.",
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "plugins": [
     {
       "name": "collab",
       "description": "collab-plugin — autonomous multi-agent collaboration. Single /collab <message> command; five message-routed paths; JSONL events on git transport; cross-machine + cross-harness. Requires core-plugin.",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "source": "./",
       "category": "productivity",
       "author": {

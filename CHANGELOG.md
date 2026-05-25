@@ -4,6 +4,25 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.1.2] — 2026-05-25
+
+Patch release. Per-collab tick cadence + Codex YAML compatibility for SKILL.md frontmatter.
+
+### Added
+- Configurable tick cadence via `--tick-interval-minutes <n>` on `collab-kickoff.mjs` (default 30; valid range 1–1440). The value is written to the kickoff event's payload as `tick_interval_minutes` and read by all safety-net calculations.
+- `getTickIntervalMs(events)` helper in `collab-event-helpers.mjs`. Single source of truth for per-collab tick cadence; falls back to the 30-min default when the field is absent.
+- Per-collab safety-net scaling: the stall threshold (6 × tick) and silence-as-ratification window (3 × tick) now scale with the kickoff's cadence. A 5-min-cadence collab stalls at 30 min and ratifies silence at 15 min; a 30-min-cadence collab keeps v0.1.1 behavior (180 min stall, 90 min silence-ratify).
+- `collab-route.mjs` join-route output now includes `tick_interval_minutes` so SKILL.md can recommend the right `/loop <n>m` command.
+- Validator (`collab-validate.mjs`): `tick_interval_minutes` is optional on kickoff; if present must be a number in `[1, 1440]`.
+- 11 new tests in `tests/test-tick-cadence.mjs` covering helper return values, stall scaling, and silence-ratify scaling. Suite total: 90 tests.
+
+### Fixed
+- **SKILL.md frontmatter:** `description` value now quoted so YAML parsers don't interpret embedded colons as mapping keys. Codex was rejecting v0.1.1 with `invalid YAML: mapping values are not allowed in this context at line 2 column 126` and skipping skill load entirely. Quoting the string also escapes the colon-style enumeration ("five paths: kickoff, ...") which is now rendered as an em-dash.
+
+### Backward compatibility
+- Kickoff events without `tick_interval_minutes` keep v0.1.1 behavior (30-min cadence, 90-min silence-ratify, 180-min stall). All v0.1.1 tests still pass unchanged.
+- `TICK_INTERVAL_MS` and `SILENCE_RATIFY_MS` constants kept as exported defaults.
+
 ## [0.1.1] — 2026-05-25
 
 The meaningful v0.1 release. (v0.1.0 fired from a CI auto-tag after the Phase 1 scaffold pushed; the plugin wasn't actually usable end-to-end until this release.)

@@ -11,7 +11,7 @@
 import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { COLLABS_DIR, readEvents, isClosed, hasJoined, deriveTriplet } from './collab-event-helpers.mjs';
+import { COLLABS_DIR, readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir } from './collab-event-helpers.mjs';
 
 const SLUG_PATTERNS = [
   /\bslug\s+([a-z0-9][a-z0-9-]{0,49})\b/i,
@@ -80,6 +80,17 @@ export function buildStateFromDisk(triplet) {
   return state;
 }
 
+// For join routes, surface the kickoff's tick cadence so SKILL.md can show the
+// right /loop command. Defaults to 30 when the kickoff didn't declare a cadence.
+export function tickIntervalMinutesFromKickoff(slug) {
+  const dir = findCollabDir(slug);
+  if (!dir) return 30;
+  const events = readEvents(dir);
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const minutes = kickoff?.payload?.tick_interval_minutes;
+  return (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) ? minutes : 30;
+}
+
 export function main(argv) {
   let message = null, workspaceId = 'unknown';
   for (let i = 0; i < argv.length; i++) {
@@ -90,6 +101,9 @@ export function main(argv) {
   const triplet = deriveTriplet(workspaceId);
   const state = buildStateFromDisk(triplet);
   const result = detectAction(message, state);
+  if (result.route === 'join' && result.slug) {
+    result.tick_interval_minutes = tickIntervalMinutesFromKickoff(result.slug);
+  }
   process.stdout.write(JSON.stringify({ ...result, triplet }) + '\n');
   return 0;
 }
