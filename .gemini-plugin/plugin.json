@@ -1,0 +1,23 @@
+{
+  "name": "collab",
+  "version": "0.1.0",
+  "description": "collab-plugin — autonomous multi-agent collaboration. Single /collab command; kickoff/join/tick/status/abort routing; JSONL events on git transport; cross-machine + cross-harness.",
+  "author": { "name": "David Bates", "email": "david_bates@mac.com", "url": "https://github.com/dbatesai" },
+  "homepage": "https://github.com/dbatesai/collab-plugin",
+  "repository": "https://github.com/dbatesai/collab-plugin",
+  "license": "MIT",
+  "keywords": ["multi-agent", "collaboration", "autonomous", "gemini", "core"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "collab",
+    "shortDescription": "Autonomous multi-agent collaboration",
+    "longDescription": "Single /collab <message> command orchestrates autonomous multi-agent collaborations on a structured event log over git. Cross-machine, cross-harness. Requires core-plugin.",
+    "developerName": "David Bates",
+    "category": "Productivity",
+    "capabilities": ["Interactive", "Read", "Write"],
+    "defaultPrompt": ["/collab \"start a review pass\""],
+    "websiteURL": "https://github.com/dbatesai/collab-plugin",
+    "brandColor": "#1F2937",
+    "screenshots": []
+  }
+}

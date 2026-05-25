@@ -1,0 +1,17 @@
+{
+  "name": "collab",
+  "owner": { "name": "David Bates", "email": "david_bates@mac.com" },
+  "metadata": { "description": "Autonomous multi-agent collaboration protocol.", "version": "0.1.0" },
+  "plugins": [{
+    "name": "collab",
+    "description": "collab-plugin — autonomous multi-agent collaboration. Single /collab <message> command; five message-routed paths; JSONL events on git transport; cross-machine + cross-harness. Requires core-plugin.",
+    "version": "0.1.0",
+    "source": "./",
+    "category": "productivity",
+    "author": { "name": "David Bates", "email": "david_bates@mac.com" },
+    "homepage": "https://github.com/dbatesai/collab-plugin",
+    "repository": "https://github.com/dbatesai/collab-plugin",
+    "license": "MIT",
+    "keywords": ["multi-agent", "collaboration", "autonomous", "claude-code", "core"]
+  }]
+}
