@@ -23,6 +23,25 @@ test('deriveSlug: max 50 chars', () => {
   assert.ok(deriveSlug('a'.repeat(60)).length <= 50);
 });
 
+test('deriveSlug: truncates at word boundary, not mid-word', () => {
+  // "v0.2 spec rework collab plugin transport modes spec against" → slug before truncation is long
+  const s = deriveSlug('v02 spec rework collab plugin transport modes spec against the changelist');
+  assert.ok(s.length <= 50, `length ${s.length} > 50`);
+  assert.ok(!s.endsWith('-'), `trailing dash: ${s}`);
+  // Must end at a word boundary (last char before truncation is alphanumeric, not mid-word)
+  assert.ok(/[a-z0-9]$/.test(s), `ends mid-word: ${s}`);
+  // The prior bug: 'rework-collabplugin-v02-transportmodes-spec-agains' — ends with partial word
+  assert.ok(!s.endsWith('agains'), `mid-word cut: ${s}`);
+});
+
+test('deriveSlug: word-boundary truncation does not cut short words', () => {
+  // Exact 50-char slug with hyphen at position 49: should keep all 50
+  const msg = 'aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk ll mm';
+  const s = deriveSlug(msg);
+  assert.ok(s.length <= 50);
+  assert.ok(!s.endsWith('-'));
+});
+
 test('deriveSlug: collapses whitespace', () => {
   assert.equal(deriveSlug('hello   world'), 'hello-world');
 });

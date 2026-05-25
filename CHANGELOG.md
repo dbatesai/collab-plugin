@@ -4,6 +4,24 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.1.4] — 2026-05-25
+
+Patch release. Word-boundary slug truncation + cross-harness SKILL.md path portability.
+
+### Fixed
+- **`deriveSlug()` word-boundary truncation:** slugs longer than 50 characters are now cut at the last hyphen at or before 50 chars rather than mid-word. Previously `/collab "v0.2 spec rework collab plugin transport modes spec against the changelist"` produced `rework-collabplugin-v02-transportmodes-spec-agains` (mid-word). Now produces a clean word-boundary slug.
+- **SKILL.md cross-harness path portability:** all 8 script path examples changed from `${CLAUDE_PLUGIN_ROOT}` to `${COLLAB_PLUGIN_ROOT}` with a note at the top explaining the per-harness substitution (`${CLAUDE_PLUGIN_ROOT}` on Claude Code, `${CODEX_PLUGIN_ROOT}` on Codex, `${GEMINI_PLUGIN_ROOT}` on Gemini CLI). Prevents Codex and Gemini from reading examples as literal `${CLAUDE_PLUGIN_ROOT}` strings.
+
+### Tests
+- 2 new tests in `tests/test-collab-kickoff.mjs` covering word-boundary truncation. Suite total: 111 tests.
+
+### Design notes
+- `deriveSlug()` now: (1) build full slug, (2) if ≤50 chars return as-is, (3) truncate to 50, (4) find last hyphen in truncated string, (5) cut there. Falls back to hard 50-char cut only when there is no hyphen in the first 50 chars (extremely long single-word slug).
+- `${COLLAB_PLUGIN_ROOT}` is a documentation convention, not a new env var. The actual env var each harness sets differs; the note tells the reader which to use.
+
+### Backward compatibility
+- `deriveSlug()` change is backward-compatible for messages that produce slugs ≤50 chars (no change). Longer messages get cleaner slugs.
+
 ## [0.1.3] — 2026-05-25
 
 Patch release. 6-digit PIN as David's manual-entry shorthand for `/collab`.

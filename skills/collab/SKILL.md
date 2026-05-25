@@ -9,6 +9,8 @@ description: "Autonomous multi-agent collaboration. Single /collab <message> com
 
 When a user types `/collab <message>`, route the message + state to one of five actions: **kickoff**, **join**, **tick**, **status**, or **abort**. All collab state lives in `~/Documents/Projects/files/collabs/<YYYY-MM-DD>-<slug>/events.jsonl` (canonical) with rendered `STATUS.md` and `turns/*.md` files.
 
+**Path variable:** Script examples below use `${COLLAB_PLUGIN_ROOT}`. Substitute the actual path for your harness: `${COLLAB_PLUGIN_ROOT}` on Claude Code, `${CODEX_PLUGIN_ROOT}` on Codex, `${GEMINI_PLUGIN_ROOT}` on Gemini CLI.
+
 The agent (you, Claude Code) makes judgment calls about turn content and ratify/object decisions. The scripts handle everything mechanical: event schema, slug derivation, safety-net checks, git transport.
 
 ## Step 1: Detect the route
@@ -16,7 +18,7 @@ The agent (you, Claude Code) makes judgment calls about turn content and ratify/
 Run the deterministic routing script:
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "<message>" --workspace-id <workspace_id>
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "<message>" --workspace-id <workspace_id>
 ```
 
 Output is JSON: `{ route, slug?, extractedSlug?, triplet }`.
@@ -35,7 +37,7 @@ Output is JSON: `{ route, slug?, extractedSlug?, triplet }`.
 ### Route: kickoff
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--tick-interval-minutes <n>] [--pin <6-digits>]
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" --workspace-id <id> [--tick-interval-minutes <n>] [--pin <6-digits>]
 ```
 
 This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits, and pushes. Stdout reports the slug, the auto-generated 6-digit PIN (David's manual-entry shorthand), and the recommended `/loop` command at the chosen cadence.
@@ -67,8 +69,8 @@ If yes — emit a join event by running:
 
 ```bash
 node --input-type=module -e "
-import {findCollabDir, readEvents, nextEventId, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
-import {render} from '${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
+import {findCollabDir, readEvents, nextEventId, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
+import {render} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
 gitPullRebase();
 const dir = findCollabDir('<slug>');
 const events = readEvents(dir);
@@ -88,7 +90,7 @@ If no — emit a `decline` event with reason instead (same pattern, `type: 'decl
 ### Route: tick
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-tick.mjs <slug> --workspace-id <id>
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-tick.mjs <slug> --workspace-id <id>
 ```
 
 This runs the deterministic part of the tick (pull, check safety nets, handle close paths). Stdout returns JSON:
@@ -155,7 +157,7 @@ If any dimension is `met: false`, your synthesis must name what's still required
 ### Route: status
 
 ```bash
-node ${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-status.mjs <slug>
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-status.mjs <slug>
 ```
 
 Pure terminal display. No event emitted.
@@ -166,8 +168,8 @@ Emit a close event with `outcome: 'aborted-david'`:
 
 ```bash
 node --input-type=module -e "
-import {findCollabDir, readEvents, nextEventId, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
-import {render} from '${CLAUDE_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
+import {findCollabDir, readEvents, nextEventId, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
+import {render} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
 gitPullRebase();
 const dir = findCollabDir('<slug>');
 const events = readEvents(dir);

@@ -64,14 +64,17 @@ export function resolveCollabByPin(pin) {
 // --- Slug ---
 
 export function deriveSlug(message) {
-  return message
+  const slug = message
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, '')
     .trim()
     .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .slice(0, 50)
-    .replace(/-+$/, '');
+    .replace(/-+/g, '-');
+  if (slug.length <= 50) return slug;
+  // Truncate at a word boundary (last hyphen at or before 50 chars)
+  const truncated = slug.slice(0, 50);
+  const lastHyphen = truncated.lastIndexOf('-');
+  return lastHyphen > 0 ? truncated.slice(0, lastHyphen) : truncated;
 }
 
 // --- Triplet ---
