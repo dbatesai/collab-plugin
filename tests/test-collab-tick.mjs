@@ -66,3 +66,18 @@ test('detectRoute returns closed on closed collab', () => {
     payload:{ final_synthesis:'done', outcome:'converged' } };
   assert.equal(detectRoute([KO, JN, cl], 'any', T0), 'closed');
 });
+
+test('single-agent: propose-close is immediately converged (no others to ratify)', () => {
+  const events = [
+    { event_id:'evt-001', ts:T0, author:'solo@cc:home', slug:'s', type:'kickoff', references:[],
+      payload:{ message:'t', igm:{intention:'i',goal:'g',measure:'m'}, capabilities_wanted:[], wall_clock_hours:24 } },
+    { event_id:'evt-002', ts:T0, author:'solo@cc:home', slug:'s', type:'join', references:[],
+      payload:{ capability_match:[], commitment:'solo' } },
+    { event_id:'evt-003', ts:T0, author:'solo@cc:home', slug:'s', type:'propose-close', references:[],
+      payload:{ synthesis:'done', igm_met:{} } },
+  ];
+  const status = getRatificationStatus(events);
+  assert.ok(status, 'expected ratification status object');
+  assert.equal(status.converged, true, 'single-agent should converge immediately');
+  assert.equal(status.otherAgents.length, 0, 'no other agents');
+});
