@@ -4,14 +4,19 @@
  * Pure routing: takes a natural-language message and current collab state,
  * returns one of: kickoff | join | tick | status | abort | fuzzy.
  *
+ * v0.2: transport-aware. Parser grammar per §6.2:
+ *   message → [verb-prefix?] [transport-token?] <discourse-body>
+ * State carries a byTransport dimension per §6.1; PINs remain flat per §6.3.
+ *
  * CLI: node collab-route.mjs "<message>" [--workspace-id <id>]
- *   Reads ~/Documents/Projects/files/collabs/ for state automatically when run as CLI.
- *   Returns route + slug as JSON on stdout.
+ *   Scans both ~/.collab/local/ (localhost) and ~/Documents/Projects/<repo>/collabs/
+ *   (github:<repo>) when run as CLI. Returns route + slug + transport as JSON on stdout.
  */
 import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { COLLABS_DIR, readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir, isPinRef } from './collab-event-helpers.mjs';
+import { readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir, isPinRef } from './collab-event-helpers.mjs';
+import { LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT } from './transport.mjs';
 
 const SLUG_PATTERNS = [
   /\bslug\s+([a-z0-9][a-z0-9-]{0,49})\b/i,
@@ -26,6 +31,41 @@ const SLUG_PATTERNS = [
 const ABORT_RE = /\b(abort|cancel)\b/i;
 const STATUS_RE = /\b(status|happening|what'?s\s+happening|how is)\b/i;
 
+const VERB_PREFIX_RE = /^(look at|talk about|discuss|review|join|status of|abort|cancel)\s+/i;
+const TRANSPORT_TOKEN_RE = /^(localhost|github:[a-z0-9_-]+)\s+/i;
+
+/**
+ * extractTransport — peel off an optional leading verb prefix, then an optional
+ * leading transport token. The verb prefix is only consumed when a transport
+ * token follows; otherwise the original message is returned untouched so the
+ * downstream slug-pattern matcher can still see the verb (e.g. 'look at X').
+ *
+ * Returns { transport, rest }.
+ *
+ * Examples:
+ *   'localhost discuss memory'              → { transport: 'localhost', rest: 'discuss memory' }
+ *   'github:files look at slug X'           → { transport: 'github:files', rest: 'look at slug X' }
+ *   'look at localhost slug X'              → { transport: 'localhost', rest: 'slug X' }
+ *   'discuss the architecture'              → { transport: null, rest: 'discuss the architecture' }
+ *   'localhost' (no trailing space)         → { transport: null, rest: 'localhost' }
+ */
+export function extractTransport(rawMessage) {
+  // First try: transport at the very start (no verb prefix).
+  let m = rawMessage.match(TRANSPORT_TOKEN_RE);
+  if (m) return { transport: m[1].toLowerCase(), rest: rawMessage.slice(m[0].length) };
+
+  // Second try: verb prefix + transport. Strip both together.
+  const verbMatch = rawMessage.match(VERB_PREFIX_RE);
+  if (verbMatch) {
+    const afterVerb = rawMessage.slice(verbMatch[0].length);
+    m = afterVerb.match(TRANSPORT_TOKEN_RE);
+    if (m) return { transport: m[1].toLowerCase(), rest: afterVerb.slice(m[0].length) };
+  }
+
+  // No transport token anywhere at the head — leave the message untouched.
+  return { transport: null, rest: rawMessage };
+}
+
 export function extractSlug(message) {
   for (const re of SLUG_PATTERNS) {
     const m = message.match(re);
@@ -35,61 +75,81 @@ export function extractSlug(message) {
 }
 
 // If the extracted ref is a 6-digit PIN, resolve it to a full slug via
-// state.pinIndex. Returns the resolved slug or the original ref if no match.
+// state.pinIndex (flat across transports per §6.3). Returns the resolved slug
+// or the original ref if no match.
 function resolvePinRef(ref, state) {
   if (!ref || !isPinRef(ref)) return ref;
   return state.pinIndex?.get(ref) || ref;
 }
 
-export function detectAction(message, state) {
+export function detectAction(message, state, explicitTransport) {
+  const transport = explicitTransport || 'github:files';
+  const view = (state.byTransport && state.byTransport[transport])
+    || { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
+
   const rawSlug = extractSlug(message);
   const extractedSlug = resolvePinRef(rawSlug, state);
 
   if (ABORT_RE.test(message) && extractedSlug) {
-    if (state.existsActive.has(extractedSlug)) {
-      return { route: 'abort', slug: extractedSlug };
+    if (view.existsActive.has(extractedSlug)) {
+      return { route: 'abort', slug: extractedSlug, transport };
     }
-    return { route: 'fuzzy', extractedSlug };
+    return { route: 'fuzzy', extractedSlug, transport };
   }
 
   if (STATUS_RE.test(message) && extractedSlug) {
-    if (state.existsActive.has(extractedSlug) || state.existsClosed.has(extractedSlug)) {
-      return { route: 'status', slug: extractedSlug };
+    if (view.existsActive.has(extractedSlug) || view.existsClosed.has(extractedSlug)) {
+      return { route: 'status', slug: extractedSlug, transport };
     }
-    return { route: 'fuzzy', extractedSlug };
+    return { route: 'fuzzy', extractedSlug, transport };
   }
 
-  if (extractedSlug && state.existsActive.has(extractedSlug)) {
-    if (state.joined.has(extractedSlug)) return { route: 'tick', slug: extractedSlug };
-    return { route: 'join', slug: extractedSlug };
+  if (extractedSlug && view.existsActive.has(extractedSlug)) {
+    if (view.joined.has(extractedSlug)) return { route: 'tick', slug: extractedSlug, transport };
+    return { route: 'join', slug: extractedSlug, transport };
   }
 
-  if (extractedSlug && !state.existsActive.has(extractedSlug) && !state.existsClosed.has(extractedSlug)) {
-    return { route: 'fuzzy', extractedSlug };
+  if (extractedSlug && !view.existsActive.has(extractedSlug) && !view.existsClosed.has(extractedSlug)) {
+    return { route: 'fuzzy', extractedSlug, transport };
   }
 
-  if (extractedSlug && state.existsClosed.has(extractedSlug)) {
-    return { route: 'fuzzy', extractedSlug };
+  if (extractedSlug && view.existsClosed.has(extractedSlug)) {
+    return { route: 'fuzzy', extractedSlug, transport };
   }
 
-  return { route: 'kickoff' };
+  return { route: 'kickoff', transport };
 }
 
 export function buildStateFromDisk(triplet) {
-  const state = { existsActive: new Set(), existsClosed: new Set(), joined: new Set(), pinIndex: new Map() };
-  if (!existsSync(COLLABS_DIR)) return state;
-  for (const e of readdirSync(COLLABS_DIR, { withFileTypes: true })) {
-    if (!e.isDirectory()) continue;
-    const slug = e.name.replace(/^\d{4}-\d{2}-\d{2}-/, '');
-    const events = readEvents(join(COLLABS_DIR, e.name));
-    const active = !isClosed(events);
-    if (active) state.existsActive.add(slug); else state.existsClosed.add(slug);
-    if (hasJoined(events, triplet)) state.joined.add(slug);
-    // PIN index: active collabs win on collision (vanishingly unlikely).
-    const kickoff = events.find(ev => ev.type === 'kickoff');
-    const pin = kickoff?.payload?.pin;
-    if (pin && /^\d{6}$/.test(pin) && (active || !state.pinIndex.has(pin))) {
-      state.pinIndex.set(pin, slug);
+  const state = { byTransport: {}, pinIndex: new Map() };
+  const transportsToScan = [];
+  if (existsSync(LOCAL_COLLABS_ROOT)) {
+    transportsToScan.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
+  }
+  if (existsSync(GITHUB_REPOS_ROOT)) {
+    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const root = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
+      if (existsSync(root)) transportsToScan.push({ transport: `github:${e.name}`, root });
+    }
+  }
+  for (const { transport, root } of transportsToScan) {
+    const view = { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
+    state.byTransport[transport] = view;
+    for (const e of readdirSync(root, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const slug = e.name.replace(/^\d{4}-\d{2}-\d{2}-/, '');
+      const events = readEvents(join(root, e.name));
+      const active = !isClosed(events);
+      if (active) view.existsActive.add(slug); else view.existsClosed.add(slug);
+      if (hasJoined(events, triplet)) view.joined.add(slug);
+      // PIN index is flat across transports (PINs are globally unique like slugs).
+      // Active collabs win on collision (vanishingly unlikely).
+      const kickoff = events.find(ev => ev.type === 'kickoff');
+      const pin = kickoff?.payload?.pin;
+      if (pin && /^\d{6}$/.test(pin) && (active || !state.pinIndex.has(pin))) {
+        state.pinIndex.set(pin, slug);
+      }
     }
   }
   return state;
@@ -97,6 +157,9 @@ export function buildStateFromDisk(triplet) {
 
 // For join routes, surface the kickoff's tick cadence so SKILL.md can show the
 // right /loop command. Defaults to 30 when the kickoff didn't declare a cadence.
+// Note: still uses the legacy single-transport findCollabDir scanner. Since slugs
+// are unique across transports (T5 assertSlugUnique), this returns null for
+// localhost-only collabs, which falls back to the 30-min default — acceptable.
 export function tickIntervalMinutesFromKickoff(slug) {
   const dir = findCollabDir(slug);
   if (!dir) return 30;
@@ -113,9 +176,10 @@ export function main(argv) {
     else if (!argv[i].startsWith('--') && message === null) message = argv[i];
   }
   if (!message) { process.stderr.write('usage: collab-route.mjs "<message>" [--workspace-id <id>]\n'); return 2; }
+  const { transport: explicitTransport, rest } = extractTransport(message);
   const triplet = deriveTriplet(workspaceId);
   const state = buildStateFromDisk(triplet);
-  const result = detectAction(message, state);
+  const result = detectAction(rest, state, explicitTransport);
   if (result.route === 'join' && result.slug) {
     result.tick_interval_minutes = tickIntervalMinutesFromKickoff(result.slug);
   }
