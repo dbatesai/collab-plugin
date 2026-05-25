@@ -7,7 +7,7 @@ function buildCleanLifecycle() {
   const T0 = '2026-05-25T10:00:00Z';
   return [
     { event_id:'evt-001', ts:T0, author:'orig@claude-code:m1', slug:'test', type:'kickoff', references:[],
-      payload:{ message:'test', igm:{intention:'i',goal:'g',measure:'m'}, capabilities_wanted:['x'], wall_clock_hours:24 } },
+      payload:{ message:'test', igm:{intention:'i',goal:'g',measure:'m'}, capabilities_wanted:['x'], wall_clock_hours:24, transport:'github:files' } },
     { event_id:'evt-002', ts:T0, author:'orig@claude-code:m1', slug:'test', type:'join', references:['evt-001'],
       payload:{ capability_match:[], commitment:'originator self-join' } },
     { event_id:'evt-003', ts:'2026-05-25T10:05:00Z', author:'peer1@claude-code:m2', slug:'test', type:'join', references:['evt-001'],
