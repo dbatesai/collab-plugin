@@ -4,6 +4,44 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [0.2.0] — 2026-05-25
+
+Minor release. Transport modes (`localhost` + `github:<repo>`), one-event-per-file event store, decoupled ratification window, harness detection fallback chain, transport preflight, strict slug uniqueness, and `min_collab_plugin_version` enforcement on join.
+
+### Added
+- **Transport modes.** `/collab [transport] <message>` accepts `localhost` (events at `~/.collab/local/`, no git) and `github:<repo>` (events in `~/Documents/Projects/<repo>/collabs/`). Default when omitted: `github:files` (v0.1.x behavior preserved).
+- **One-event-per-file event store.** Canonical store moves from a single `events.jsonl` to `events/evt-<YYYYMMDDHHmm>-<author-slug>-<4hex>.json`. `events.jsonl` becomes a derived render artifact. Atomic temp→rename writes; reader filters `.tmp-` prefix files; first-wins dedup on duplicate event_ids; malformed-file warn-and-skip on both `events/` and JSONL fallback paths.
+- **Decoupled ratification window.** `ratification_window_minutes` becomes its own kickoff payload field, no longer locked to `3 × tick_interval_minutes`. Localhost floor: 30 minutes regardless of tick cadence.
+- **Harness detection fallback chain.** `detectHarness()` priority: `CODEX_PLUGIN_ROOT` → `'codex'`; `GEMINI_PLUGIN_ROOT` → `'gemini'`; `COLLAB_HARNESS_OVERRIDE` → use verbatim; else `'claude-code'`. Closes Phase 3 finding #15 — Gemini's `core-gemini@claude-code:...` misidentification.
+- **Transport preflight.** Before any event append, `preflightTransport()` confirms read+write at the collabs root for the chosen transport. Surfaces permission errors with a human-readable message.
+- **Strict slug uniqueness across transports.** Kickoff fails if the slug exists in any transport. Removes a class of disambiguation prompts; makes slug → transport a total function.
+- **`min_collab_plugin_version` field on kickoff payload.** Joining agents on older versions refuse with the canonical error: *"This collab requires collab-plugin >= `<min>`; this install is on `<local>`. Upgrade and retry."* `readLocalPluginVersion()` walks the CODEX/GEMINI/CLAUDE/COLLAB env-var chain so all three harnesses resolve correctly.
+- **`collab-list.mjs`** — cross-transport listing helper. Auto-detects all `github:<repo>` transports by scanning `~/Documents/Projects/`. Filter with `--active` (default), `--closed`, or `--all`.
+- **`transport.mjs`** module — `resolveTransportPaths`, `isGitTransport`, `defaultTickIntervalMinutes`, `defaultRatificationWindowMinutes`, `preflightTransport`, `detectHarness`, `parseTransport`, `collabsRootForTransport`. The single source of truth for transport behavior.
+
+### Changed
+- **Localhost default tick cadence: 2 minutes.** Override per-kickoff with `--tick-interval-minutes <n>` (use `1` for high-stakes adversarial reviews where objections need to land in under a minute).
+- All scripts route storage through `transport.mjs`. No script hardcodes `~/Documents/Projects/files/` anymore.
+- `gitPullRebase(transport)` and `gitCommitPush(collabDir, transport, commitMsg)` now require a transport arg; called only when `isGitTransport(transport)` is true.
+- `collab-status.mjs` accepts `--transport <id>` for disambiguation; auto-resolves via `findCollabAcrossTransports` when transport not given.
+- `collab-route.mjs` parser extracts a leading transport token (`localhost` or `github:<repo>`). Verb prefixes are split into discourse (`look at|talk about|discuss|review|join`, safely stripped) and routing (`abort|cancel|status of`, preserved so `detectAction` can still route them).
+- Self-join event timestamp bumped by 1ms over kickoff timestamp so `readEvents` deterministically sorts kickoff first.
+
+### Backward compatibility
+- v0.1.x collabs with only `events.jsonl` (no `events/` dir) are still readable. `readEvents()` falls back to the JSONL path with a warning.
+- v0.1.x kickoff events without `transport` are treated as `github:files` at read time. Validator emits a warning, not an error.
+- v0.1.x kickoff events without `min_collab_plugin_version` skip the version check.
+- v0.1.x kickoff events without `ratification_window_minutes` fall back to `3 × tick_interval_minutes`.
+- `/collab <message>` (no transport prefix) still works — defaults to `github:files`.
+- **Writes to a v0.1.x hybrid layout (events.jsonl present, events/ absent) are refused** with a clear error. Per spec §9.6 compat is read-only; the refusal prevents silent history-stranding.
+
+### Known limitations (v0.2)
+- **Concurrent kickoff race.** Two agents that kick off the same slug at the exact same instant both pass `assertSlugUnique` before either writes; the second overwrites the first. Acceptable because David's two-touchpoint model is sequential. A lockfile would close it in v0.3 if needed.
+- **No automatic v0.1.x → v0.2 migration.** Hybrid layouts refuse writes; manual migration is required (split events.jsonl into one file per line under events/).
+
+### Tests
+- 28 new tests across `test-transport.mjs`, `test-event-store.mjs`, `test-version-check.mjs`, `test-collab-list.mjs`, plus additions to route/kickoff/tick/validate/render/e2e. New end-to-end test that drives kickoff → propose-close → ratify → close on the real localhost transport. Suite total: 111 → 178/179 (one pre-existing tick-cadence test unchanged).
+
 ## [0.1.4] — 2026-05-25
 
 Patch release. Word-boundary slug truncation + cross-harness SKILL.md path portability.

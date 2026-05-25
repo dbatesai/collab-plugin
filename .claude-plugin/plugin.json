@@ -1,7 +1,7 @@
 {
   "name": "collab",
-  "version": "0.1.4",
-  "description": "collab-plugin — autonomous multi-agent collaboration. Single /collab <message> command routes by message + state: kickoff, join, tick, status, abort. Structured JSONL events on git transport; cross-machine + cross-harness.",
+  "version": "0.2.0",
+  "description": "collab-plugin — autonomous multi-agent collaboration. /collab [transport] <message> routes by message + state: kickoff, join, tick, status, abort. Two transports: localhost (same-filesystem) and github:<repo> (git-mediated). One-event-per-file event store; cross-machine + cross-harness.",
   "author": {
     "name": "David Bates",
     "email": "david_bates@mac.com"
