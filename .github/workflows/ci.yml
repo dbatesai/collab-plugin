@@ -1,0 +1,67 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    name: validate plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Node syntax check
+        run: |
+          set -e; shopt -s globstar nullglob; fail=0
+          for f in skills/collab/scripts/**/*.mjs; do
+            echo "checking $f"; node --check "$f" || fail=1
+          done; exit $fail
+      - name: Validate plugin manifests
+        run: |
+          set -e
+          for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json .codex-plugin/plugin.json .gemini-plugin/plugin.json; do
+            echo "parsing $f"; node -e "JSON.parse(require('fs').readFileSync('$f','utf8'))"
+          done
+      - name: plugin.json required fields
+        run: |
+          node -e '
+            const m=JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8"));
+            for(const k of ["name","version","description","author","license"])
+              if(!m[k]){console.error("missing: "+k);process.exit(1);}
+            console.log("fields ok");'
+      - name: Harness manifest lockstep
+        run: |
+          node -e '
+            const fs=require("fs");
+            const c=JSON.parse(fs.readFileSync(".claude-plugin/plugin.json","utf8")).version;
+            const x=JSON.parse(fs.readFileSync(".codex-plugin/plugin.json","utf8")).version;
+            const g=JSON.parse(fs.readFileSync(".gemini-plugin/plugin.json","utf8")).version;
+            if(c!==x||c!==g){console.error("DRIFT",{c,x,g});process.exit(1);}
+            console.log("lockstep OK:",c);'
+      - name: SKILL.md frontmatter
+        run: |
+          node -e '
+            const src=require("fs").readFileSync("skills/collab/SKILL.md","utf8");
+            const m=src.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+            if(!m){console.error("no frontmatter");process.exit(1);}
+            for(const k of ["name","description"])
+              if(!new RegExp("^"+k+":\\s*\\S","m").test(m[1])){console.error("missing: "+k);process.exit(1);}
+            console.log("SKILL.md frontmatter OK");'
+      - name: BUILD file present
+        run: |
+          set -e
+          test -s "skills/collab/BUILD" || { echo "missing BUILD"; exit 1; }
+          echo "BUILD=$(cat skills/collab/BUILD)"
+      - name: Scripts import without crashing
+        run: |
+          set -e; shopt -s globstar nullglob; fail=0
+          for f in skills/collab/scripts/*.mjs; do
+            echo "import-loading $f"
+            node --input-type=module -e "await import('./$f');" 2>&1 || fail=1
+          done; exit $fail
+      - name: Unit tests
+        run: node --test tests/*.mjs 2>&1

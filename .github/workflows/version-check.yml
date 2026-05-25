@@ -1,0 +1,21 @@
+name: Version check
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Version bumped vs main
+        run: |
+          git fetch origin main
+          BASE=$(git show origin/main:.claude-plugin/plugin.json | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('/dev/stdin','utf8')).version)")
+          PR=$(node -e "process.stdout.write(JSON.parse(require('fs').readFileSync('.claude-plugin/plugin.json','utf8')).version)")
+          echo "main: $BASE  PR: $PR"
+          [ "$BASE" != "$PR" ] || { echo "ERROR: version not bumped"; exit 1; }
+          echo "OK: $BASE -> $PR"
