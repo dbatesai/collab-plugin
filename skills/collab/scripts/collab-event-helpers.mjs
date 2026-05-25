@@ -15,6 +15,11 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
+// detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
+// Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
+import { detectHarness } from './transport.mjs';
+export { detectHarness };
+
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
 export const COLLABS_DIR = join(FILES_REPO, 'collabs');
 export const TICK_INTERVAL_MS = 30 * 60 * 1000; // default 30 min; per-collab override via kickoff payload's tick_interval_minutes
@@ -91,13 +96,6 @@ export function generateEventId(tsIso, authorSlug) {
 }
 
 // --- Triplet ---
-
-export function detectHarness() {
-  if (process.env.CLAUDE_PLUGIN_ROOT) return 'claude-code';
-  if (process.env.CODEX_PLUGIN_ROOT) return 'codex';
-  if (process.env.GEMINI_PLUGIN_ROOT) return 'gemini';
-  return 'claude-code';
-}
 
 export function deriveTriplet(workspaceId) {
   const r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
