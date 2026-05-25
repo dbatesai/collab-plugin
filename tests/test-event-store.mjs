@@ -50,6 +50,22 @@ test('readEvents reads from events/ dir, sorted by ts then event_id', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('readEvents returns [] for empty events/ dir', () => {
+  const dir = mkCollabDir();
+  assert.deepEqual(readEvents(dir), []);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('readEvents JSONL fallback skips malformed lines with warning', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'collab-jsonl-malformed-'));
+  const goodEvt = { event_id: 'evt-001', ts: '2026-05-25T09:22:00Z', author: 'a', slug: 's', type: 'kickoff', references: [], payload: {} };
+  writeFileSync(join(dir, 'events.jsonl'), JSON.stringify(goodEvt) + '\n{not valid json\n');
+  const events = readEvents(dir);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].event_id, 'evt-001');
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('readEvents skips and warns on malformed JSON files', () => {
   const dir = mkCollabDir();
   writeFileSync(join(dir, 'events', 'evt-malformed.json'), '{not valid json');

@@ -6,8 +6,8 @@
  * Shell calls: spawnSync with array args only (no exec/execSync).
  */
 import {
-  readFileSync, writeFileSync, appendFileSync,
-  existsSync, mkdirSync, readdirSync, renameSync, statSync,
+  readFileSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, renameSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, resolve } from 'node:path';
@@ -181,7 +181,13 @@ export function readEvents(collabDir) {
   }
   const jsonlPath = join(collabDir, 'events.jsonl');
   if (!existsSync(jsonlPath)) return [];
-  return readFileSync(jsonlPath, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+  const out = [];
+  for (const line of readFileSync(jsonlPath, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); }
+    catch (e) { process.stderr.write(`(warn) skipping malformed JSONL line in ${jsonlPath}: ${e.message}\n`); }
+  }
+  return out;
 }
 
 // Atomic write: temp file + rename. Always writes to events/ dir.
@@ -202,7 +208,7 @@ export function appendEvent(collabDir, event) {
   }
   if (!existsSync(eventsDir)) mkdirSync(eventsDir, { recursive: true });
   const finalPath = join(eventsDir, `${event.event_id}.json`);
-  const tmpPath = join(eventsDir, `.tmp-${event.event_id}-${process.pid}-${Date.now()}.json`);
+  const tmpPath = join(eventsDir, `.tmp-${event.event_id}-${process.pid}-${Date.now()}-${randomBytes(2).toString('hex')}.json`);
   writeFileSync(tmpPath, JSON.stringify(event, null, 2));
   renameSync(tmpPath, finalPath);
 }
