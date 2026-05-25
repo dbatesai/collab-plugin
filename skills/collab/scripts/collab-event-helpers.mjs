@@ -390,6 +390,56 @@ export function getRatificationStatus(events, nowTs) {
   };
 }
 
+// --- Version check ---
+
+function parseSemver(s) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(s);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function cmpSemver(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] < b[i]) return -1;
+    if (a[i] > b[i]) return 1;
+  }
+  return 0;
+}
+
+// Compare local installed version against minimum required. Returns {ok, error?}.
+// When minRequired is undefined/null/empty, the check passes (v0.1.x compat).
+export function checkMinVersion(localVersion, minRequired) {
+  if (!minRequired) return { ok: true };
+  const local = parseSemver(localVersion);
+  const min = parseSemver(minRequired);
+  if (!local || !min) return { ok: false, error: `version parse error (local=${localVersion}, min=${minRequired})` };
+  if (cmpSemver(local, min) >= 0) return { ok: true };
+  return { ok: false, error: `This collab requires collab-plugin >= ${minRequired}; this install is on ${localVersion}. Upgrade and retry.` };
+}
+
+// Read the plugin version from <plugin-root>/<harness-manifest>/plugin.json.
+// Walks the same env var chain as detectHarness() so Codex/Gemini agents resolve correctly.
+// CI enforces lockstep across all three manifests, so whichever resolves yields the same version.
+// Defaults to '0.0.0' when nothing resolves — version check then fails loudly.
+export function readLocalPluginVersion() {
+  const candidates = [
+    { env: 'CODEX_PLUGIN_ROOT',  manifest: '.codex-plugin/plugin.json'  },
+    { env: 'GEMINI_PLUGIN_ROOT', manifest: '.gemini-plugin/plugin.json' },
+    { env: 'CLAUDE_PLUGIN_ROOT', manifest: '.claude-plugin/plugin.json' },
+    { env: 'COLLAB_PLUGIN_ROOT', manifest: '.claude-plugin/plugin.json' },
+  ];
+  for (const { env, manifest } of candidates) {
+    const root = process.env[env];
+    if (!root) continue;
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, manifest), 'utf8'));
+      if (pkg.version) return pkg.version;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return '0.0.0';
+}
+
 // --- Git transport ---
 
 // repoForTransport: parent of the collabs/ dir for a github:<repo> transport.

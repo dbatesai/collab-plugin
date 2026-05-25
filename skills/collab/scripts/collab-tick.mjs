@@ -19,6 +19,7 @@ import {
   deriveTriplet, hasJoined, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
   gitPullRebase, gitCommitPush,
+  checkMinVersion, readLocalPluginVersion,
 } from './collab-event-helpers.mjs';
 import { isGitTransport } from './transport.mjs';
 import { render } from './collab-render.mjs';
@@ -59,6 +60,16 @@ export async function tickDeterministic(slug, options = {}) {
   const triplet = givenTriplet || deriveTriplet(workspaceId);
 
   if (!hasJoined(events, triplet)) {
+    // v0.2 version check: if kickoff specifies a min_collab_plugin_version, enforce it
+    const kickoff = events.find(e => e.type === 'kickoff');
+    const minVersion = kickoff?.payload?.min_collab_plugin_version;
+    if (minVersion) {
+      const localVersion = readLocalPluginVersion();
+      const check = checkMinVersion(localVersion, minVersion);
+      if (!check.ok) {
+        return { action: 'version-too-low', error: check.error, localVersion, minVersion, slug };
+      }
+    }
     return { action: 'not-joined', triplet, slug };
   }
 
@@ -113,8 +124,12 @@ export function main(argv) {
   if (!slug) { process.stderr.write('usage: collab-tick.mjs <slug> [--workspace-id <id>]\n'); return 2; }
   tickDeterministic(slug, { workspaceId, triplet, dryRun })
     .then(r => {
+      if (r.action === 'version-too-low') {
+        process.stderr.write(`${r.error}\n`);
+      }
       process.stdout.write(JSON.stringify(r) + '\n');
       if (r.action === 'exit') process.exit(0);
+      if (r.action === 'version-too-low') process.exit(1);
     })
     .catch(e => { process.stderr.write(`tick error: ${e.message}\n`); process.exit(1); });
 }
