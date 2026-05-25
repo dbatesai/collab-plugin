@@ -1,7 +1,15 @@
 /**
- * collab-tick.mjs — one iteration of the collab loop.
- * Called by /loop 30m every 30 minutes.
- * Deterministic state machine; LLM only for turn content.
+ * collab-tick.mjs — deterministic tick handler.
+ *
+ * Run by the agent (or /loop) on each tick. Handles only deterministic paths:
+ *   - 'closed': prints exit signal
+ *   - 'safety-net:*': emits close event with appropriate outcome
+ *   - 'emit-close': agent already proposed close and ratification converged — emit final close
+ *
+ * For LLM-decision paths ('ratify-or-object', 'turn-or-propose'), exits with
+ * exit code 0 and prints JSON: { action: 'agent-decision-needed', route, ... }.
+ * The agent reads the stdout JSON and walks through the SKILL.md algorithm.
+ *
  * CLI: node collab-tick.mjs <slug> [--workspace-id <id>] [--triplet <t>] [--dry-run]
  */
 import { realpathSync } from 'node:fs';
@@ -14,10 +22,6 @@ import {
 } from './collab-event-helpers.mjs';
 import { render } from './collab-render.mjs';
 
-/**
- * Deterministic route detection. Pure function — no LLM, no I/O.
- * Returns: 'closed' | 'safety-net:<type>' | 'emit-close' | 'ratify-or-object' | 'turn-or-propose' | 'not-joined'
- */
 export function detectRoute(events, triplet, nowTs) {
   if (isClosed(events)) return 'closed';
   const net = checkSafetyNets(events, nowTs);
@@ -30,7 +34,11 @@ export function detectRoute(events, triplet, nowTs) {
   return 'turn-or-propose';
 }
 
-export async function tick(slug, options = {}) {
+/**
+ * Run the deterministic part of a tick. Returns { action, ... }.
+ * For LLM-decision routes, the agent takes over from here.
+ */
+export async function tickDeterministic(slug, options = {}) {
   const { workspaceId = 'unknown', triplet: givenTriplet, dryRun = false } = options;
   const nowTs = new Date().toISOString();
   if (!dryRun) gitPullRebase();
@@ -41,15 +49,13 @@ export async function tick(slug, options = {}) {
   const triplet = givenTriplet || deriveTriplet(workspaceId);
 
   if (!hasJoined(events, triplet)) {
-    process.stderr.write(`warn: ${triplet} has not joined ${slug}\n`);
-    return { action: 'not-joined' };
+    return { action: 'not-joined', triplet, slug };
   }
 
   const route = detectRoute(events, triplet, nowTs);
 
   if (route === 'closed') {
-    process.stdout.write(`${slug} is closed. Cancel /loop.\n`);
-    return { action: 'exit' };
+    return { action: 'exit', reason: 'closed', slug };
   }
 
   if (route.startsWith('safety-net:')) {
@@ -82,41 +88,9 @@ export async function tick(slug, options = {}) {
     return { action: 'close', reason: 'converged', event: ev };
   }
 
-  if (route === 'ratify-or-object') {
-    const decision = await _decidRatifyOrObject(events, triplet);
-    const rat = getRatificationStatus(events);
-    const ev = {
-      event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: decision.type,
-      references: [rat.proposeClose.event_id],
-      payload: decision.type === 'ratify' ? { agreement_notes: decision.notes } : { reason: decision.reason },
-    };
-    if (!dryRun) {
-      appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet });
-      gitCommitPush(dir, `[${triplet}] ${decision.type}: ${slug} ${ev.event_id}`);
-    }
-    return { action: decision.type, event: ev };
-  }
-
-  // turn-or-propose: LLM decides (stub in P1)
-  const decision = await _decideTurnOrPropose(events, triplet);
-  if (!decision) return { action: 'idle' };
-
-  const ev = {
-    event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: decision.type,
-    references: decision.referencedIds || [], payload: decision.payload,
-  };
-  if (!dryRun) {
-    appendEvent(dir, ev);
-    await render(slug, { collabDir: dir, author: triplet });
-    gitCommitPush(dir, `[${triplet}] ${decision.type}: ${slug} ${ev.event_id}`);
-  }
-  return { action: decision.type, event: ev };
+  // LLM-decision routes: return a hint, let the agent take over
+  return { action: 'agent-decision-needed', route, triplet, slug };
 }
-
-// P1 stubs — replaced by LLM reasoning in P2
-async function _decideTurnOrPropose(_events, _triplet) { return null; }
-async function _decidRatifyOrObject(_events, _triplet) { return { type: 'ratify', notes: '(stub)' }; }
 
 export function main(argv) {
   let slug = null, workspaceId = null, dryRun = false, triplet = null;
@@ -127,8 +101,11 @@ export function main(argv) {
     else if (!argv[i].startsWith('--')) slug = argv[i];
   }
   if (!slug) { process.stderr.write('usage: collab-tick.mjs <slug> [--workspace-id <id>]\n'); return 2; }
-  tick(slug, { workspaceId, triplet, dryRun })
-    .then(r => { process.stdout.write(`tick: ${JSON.stringify(r)}\n`); if (r.action === 'exit') process.exit(0); })
+  tickDeterministic(slug, { workspaceId, triplet, dryRun })
+    .then(r => {
+      process.stdout.write(JSON.stringify(r) + '\n');
+      if (r.action === 'exit') process.exit(0);
+    })
     .catch(e => { process.stderr.write(`tick error: ${e.message}\n`); process.exit(1); });
 }
 
