@@ -114,9 +114,12 @@ export async function kickoff(message, options = {}) {
   };
   appendEvent(collabDir, kickoffEvt);
 
+  // Bump the self-join timestamp by 1ms so readEvents sorts kickoff first
+  // even when their random event_id suffixes happen to sort the join earlier.
+  const joinTs = new Date(new Date(nowTs).getTime() + 1).toISOString();
   const joinEvt = {
-    event_id: generateEventId(nowTs, authorSlug),
-    ts: nowTs,
+    event_id: generateEventId(joinTs, authorSlug),
+    ts: joinTs,
     author: triplet,
     slug,
     type: 'join',
