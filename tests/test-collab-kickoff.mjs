@@ -47,3 +47,23 @@ test('nextEventId: widens at 999', () => {
 test('authorSlugFromTriplet: extracts workspace id', () => {
   assert.equal(authorSlugFromTriplet('core-framework@claude-code:home'), 'core-framework');
 });
+
+let buildKickoffPayload, buildSelfJoinPayload;
+try {
+  ({ buildKickoffPayload, buildSelfJoinPayload } = await import('../skills/collab/scripts/collab-kickoff.mjs'));
+} catch {
+  buildKickoffPayload = buildSelfJoinPayload = () => { throw new Error('not implemented'); };
+}
+
+test('buildKickoffPayload has all required IGM fields', () => {
+  const p = buildKickoffPayload('do a review', { intention:'i', goal:'g', measure:'m' }, [], 24);
+  assert.ok(p.igm.intention && p.igm.goal && p.igm.measure);
+  assert.equal(p.message, 'do a review');
+  assert.equal(p.wall_clock_hours, 24);
+  assert.ok(Array.isArray(p.capabilities_wanted));
+});
+test('buildSelfJoinPayload has required fields', () => {
+  const p = buildSelfJoinPayload(['architecture-review'], 'I will review the arch');
+  assert.ok(Array.isArray(p.capability_match));
+  assert.ok(p.commitment);
+});
