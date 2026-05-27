@@ -11,8 +11,10 @@ import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
   checkSafetyNets, gitCommitPush, authorSlugFromTriplet,
+  renderEventsJsonl,
   STALL_TICKS, TICK_INTERVAL_MS,
 } from './collab-event-helpers.mjs';
+import { isGitTransport } from './transport.mjs';
 
 export function buildStatusMd(events, slug) {
   const kickoff = events.find(e => e.type === 'kickoff');
@@ -89,13 +91,16 @@ export async function render(slug, options = {}) {
   const turnsDir = join(dir, 'turns');
   if (!existsSync(turnsDir)) mkdirSync(turnsDir);
   for (const e of events.filter(e => e.type === 'turn')) {
-    const n = e.event_id.replace('evt-', '').padStart(3, '0');
-    writeFileSync(join(turnsDir, `${n}-${authorSlugFromTriplet(e.author)}.md`), buildTurnMd(e));
+    const idSuffix = e.event_id.replace(/^evt-/, '');
+    writeFileSync(join(turnsDir, `${idSuffix}-${authorSlugFromTriplet(e.author)}.md`), buildTurnMd(e));
   }
 
-  if (!dryRun && author) {
+  renderEventsJsonl(dir);
+
+  const transport = options.transport || events.find(e => e.type === 'kickoff')?.payload?.transport || 'github:files';
+  if (!dryRun && author && isGitTransport(transport)) {
     const last = events[events.length - 1];
-    gitCommitPush(dir, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`);
+    gitCommitPush(dir, transport, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`);
   }
 }
 

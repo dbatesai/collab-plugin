@@ -63,13 +63,17 @@ const FULL_SLUG = 'rework-v02-transport-modes-spec';
 const PIN = '654321';
 
 function stateWithPin(pin, slug, opts = {}) {
-  const state = {
-    existsActive: new Set(opts.closed ? [] : [slug]),
-    existsClosed: new Set(opts.closed ? [slug] : []),
-    joined: new Set(opts.joined ? [slug] : []),
+  const transport = opts.transport || 'github:files';
+  return {
+    byTransport: {
+      [transport]: {
+        existsActive: new Set(opts.closed ? [] : [slug]),
+        existsClosed: new Set(opts.closed ? [slug] : []),
+        joined: new Set(opts.joined ? [slug] : []),
+      },
+    },
     pinIndex: new Map([[pin, slug]]),
   };
-  return state;
 }
 
 test('extractSlug: bare 6-digit PIN', () => {

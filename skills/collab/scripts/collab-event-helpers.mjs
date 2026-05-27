@@ -6,13 +6,22 @@
  * Shell calls: spawnSync with array args only (no exec/execSync).
  */
 import {
-  readFileSync, writeFileSync, appendFileSync,
-  existsSync, mkdirSync, readdirSync
+  readFileSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, renameSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+
+// detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
+// Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
+import {
+  detectHarness, LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT,
+  parseTransport, collabsRootForTransport,
+} from './transport.mjs';
+export { detectHarness };
 
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
 export const COLLABS_DIR = join(FILES_REPO, 'collabs');
@@ -77,14 +86,19 @@ export function deriveSlug(message) {
   return lastHyphen > 0 ? truncated.slice(0, lastHyphen) : truncated;
 }
 
-// --- Triplet ---
+// --- Event ID ---
 
-export function detectHarness() {
-  if (process.env.CLAUDE_PLUGIN_ROOT) return 'claude-code';
-  if (process.env.CODEX_PLUGIN_ROOT) return 'codex';
-  if (process.env.GEMINI_PLUGIN_ROOT) return 'gemini';
-  return 'claude-code';
+// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<4-hex-random>.
+// Lexicographic sort on filename = chronological order (no central counter).
+export function generateEventId(tsIso, authorSlug) {
+  const d = new Date(tsIso);
+  const pad = (n, w = 2) => String(n).padStart(w, '0');
+  const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
+  const rand = randomBytes(2).toString('hex');
+  return `evt-${stamp}-${authorSlug}-${rand}`;
 }
+
+// --- Triplet ---
 
 export function deriveTriplet(workspaceId) {
   const r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
@@ -127,6 +141,40 @@ export function resolveCollabRef(ref) {
   return null;
 }
 
+// Scan all known transport roots for a slug. Returns
+// { transport, dir, dirName } on first hit, or null if absent everywhere.
+//
+// Transports searched:
+//   - localhost (LOCAL_COLLABS_ROOT)
+//   - every github:<repo> discovered by listing GITHUB_REPOS_ROOT for a collabs/ subdirectory
+export function findCollabAcrossTransports(slug) {
+  const roots = [];
+  if (existsSync(LOCAL_COLLABS_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
+  if (existsSync(GITHUB_REPOS_ROOT)) {
+    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const candidate = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
+      if (existsSync(candidate)) roots.push({ transport: `github:${e.name}`, root: candidate });
+    }
+  }
+  for (const { transport, root } of roots) {
+    for (const e of readdirSync(root, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      const slugPart = e.name.replace(/^\d{4}-\d{2}-\d{2}-/, '');
+      if (slugPart === slug) return { transport, dir: join(root, e.name), dirName: e.name };
+    }
+  }
+  return null;
+}
+
+// Throw when slug exists in any transport. Used by collab-kickoff.mjs (§6.3 strict).
+export function assertSlugUnique(slug) {
+  const hit = findCollabAcrossTransports(slug);
+  if (hit) {
+    throw new Error(`A collab named "${slug}" already exists in transport "${hit.transport}" (dir: ${hit.dirName}). Rephrase the kickoff message to derive a different slug.`);
+  }
+}
+
 export function createCollabDir(slug) {
   if (!existsSync(COLLABS_DIR)) mkdirSync(COLLABS_DIR, { recursive: true });
   const date = new Date().toISOString().slice(0, 10);
@@ -140,22 +188,83 @@ export function createCollabDir(slug) {
 
 // --- Event I/O ---
 
+// Read all events from <collabDir>/events/*.json. Sort by ts, then event_id as tie-breaker.
+// Backward compat: if events/ does not exist but events.jsonl does, read JSONL directly (v0.1.x).
 export function readEvents(collabDir) {
-  const path = join(collabDir, 'events.jsonl');
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+  const eventsDir = join(collabDir, 'events');
+  if (existsSync(eventsDir)) {
+    const seen = new Map(); // event_id → event (first wins on dup)
+    for (const name of readdirSync(eventsDir)) {
+      if (!name.endsWith('.json') || name.startsWith('.tmp-')) continue;
+      const path = join(eventsDir, name);
+      try {
+        const content = readFileSync(path, 'utf8');
+        const event = JSON.parse(content);
+        if (!event || typeof event !== 'object' || !event.event_id || !event.ts) {
+          process.stderr.write(`(warn) skipping malformed event file ${path}\n`);
+          continue;
+        }
+        if (!seen.has(event.event_id)) seen.set(event.event_id, event);
+      } catch (e) {
+        process.stderr.write(`(warn) skipping unreadable event file ${path}: ${e.message}\n`);
+      }
+    }
+    return [...seen.values()].sort((a, b) => {
+      if (a.ts !== b.ts) return a.ts < b.ts ? -1 : 1;
+      return a.event_id < b.event_id ? -1 : 1;
+    });
+  }
+  const jsonlPath = join(collabDir, 'events.jsonl');
+  if (!existsSync(jsonlPath)) return [];
+  const out = [];
+  for (const line of readFileSync(jsonlPath, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); }
+    catch (e) { process.stderr.write(`(warn) skipping malformed JSONL line in ${jsonlPath}: ${e.message}\n`); }
+  }
+  return out;
 }
 
+// Atomic write: temp file + rename. Always writes to events/ dir.
+//
+// v0.1.x hybrid guard: if this collab dir has events.jsonl but no events/, refuse
+// to write. The first append would otherwise strand all prior JSONL events behind
+// the new events/ directory (which readEvents prefers when present). Surfacing
+// the conflict loudly is the right move per spec §9.6 (read-only compat).
+export function appendEvent(collabDir, event) {
+  const eventsDir = join(collabDir, 'events');
+  const jsonlPath = join(collabDir, 'events.jsonl');
+  if (!existsSync(eventsDir) && existsSync(jsonlPath)) {
+    throw new Error(
+      `Refusing to write to v0.1.x collab at ${collabDir}: events.jsonl present but no events/ directory. ` +
+      `v0.2 cannot safely append to v0.1.x collabs because the first append would strand the existing history. ` +
+      `Either run this collab on a fresh slug or migrate the JSONL forward (manual: read events.jsonl, write each line as events/<event_id>.json).`,
+    );
+  }
+  if (!existsSync(eventsDir)) mkdirSync(eventsDir, { recursive: true });
+  const finalPath = join(eventsDir, `${event.event_id}.json`);
+  const tmpPath = join(eventsDir, `.tmp-${event.event_id}-${process.pid}-${Date.now()}-${randomBytes(2).toString('hex')}.json`);
+  writeFileSync(tmpPath, JSON.stringify(event, null, 2));
+  renameSync(tmpPath, finalPath);
+}
+
+// Regenerate events.jsonl from events/ dir (render artifact, not source of truth).
+export function renderEventsJsonl(collabDir) {
+  const events = readEvents(collabDir);
+  const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
+  writeFileSync(join(collabDir, 'events.jsonl'), content);
+}
+
+// nextEventId: legacy helper for v0.1.x sequential IDs (still produced by kickoff for
+// evt-001 display). v0.2 uses generateEventId for everything else.
 export function nextEventId(events) {
   if (events.length === 0) return 'evt-001';
-  const last = events[events.length - 1].event_id;
+  const seq = events.filter(e => /^evt-\d{3,}$/.test(e.event_id));
+  if (seq.length === 0) return generateEventId(new Date().toISOString(), 'sys');
+  const last = seq[seq.length - 1].event_id;
   const n = parseInt(last.replace('evt-', ''), 10) + 1;
   const width = Math.max(3, String(n).length);
   return 'evt-' + String(n).padStart(width, '0');
-}
-
-export function appendEvent(collabDir, event) {
-  appendFileSync(join(collabDir, 'events.jsonl'), JSON.stringify(event) + '\n');
 }
 
 // --- Event queries ---
@@ -194,6 +303,18 @@ export function getTickIntervalMs(events) {
     return TICK_INTERVAL_MS;
   }
   return minutes * 60 * 1000;
+}
+
+// Per-collab ratification window. Reads `ratification_window_minutes` from the
+// kickoff event's payload (v0.2). Falls back to 3 × tick_interval (v0.1.x behavior)
+// when the new field is absent.
+export function getRatificationWindowMs(events) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const minutes = kickoff?.payload?.ratification_window_minutes;
+  if (typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0) {
+    return minutes * 60 * 1000;
+  }
+  return 3 * getTickIntervalMs(events);
 }
 
 export function checkSafetyNets(events, nowTs) {
@@ -242,7 +363,7 @@ export function getRatificationStatus(events, nowTs) {
   const now = new Date(nowTs || new Date().toISOString());
   const proposeTs = new Date(proposeClose.ts);
   const silenceElapsed = now - proposeTs;
-  const silenceRatifyMs = 3 * getTickIntervalMs(events);
+  const silenceRatifyMs = getRatificationWindowMs(events);
   const eligibleForSilenceRatify = silenceElapsed > silenceRatifyMs;
 
   const implicitRatified = new Set();
@@ -269,20 +390,82 @@ export function getRatificationStatus(events, nowTs) {
   };
 }
 
-// --- Git transport ---
+// --- Version check ---
 
-export function gitPullRebase() {
-  const r = spawnSync('git', ['pull', '--rebase'], { cwd: FILES_REPO, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git pull --rebase failed: ${r.stderr}`);
+function parseSemver(s) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(s);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 
-export function gitCommitPush(collabDir, commitMsg) {
-  spawnSync('git', ['add', collabDir], { cwd: FILES_REPO, encoding: 'utf8' });
-  spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: FILES_REPO, encoding: 'utf8' });
-  for (let i = 1; i <= 3; i++) {
-    const push = spawnSync('git', ['push'], { cwd: FILES_REPO, encoding: 'utf8' });
-    if (push.status === 0) return;
-    spawnSync('git', ['pull', '--rebase'], { cwd: FILES_REPO, encoding: 'utf8' });
+function cmpSemver(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] < b[i]) return -1;
+    if (a[i] > b[i]) return 1;
   }
-  throw new Error('git push failed after 3 attempts');
+  return 0;
+}
+
+// Compare local installed version against minimum required. Returns {ok, error?}.
+// When minRequired is undefined/null/empty, the check passes (v0.1.x compat).
+export function checkMinVersion(localVersion, minRequired) {
+  if (!minRequired) return { ok: true };
+  const local = parseSemver(localVersion);
+  const min = parseSemver(minRequired);
+  if (!local || !min) return { ok: false, error: `version parse error (local=${localVersion}, min=${minRequired})` };
+  if (cmpSemver(local, min) >= 0) return { ok: true };
+  return { ok: false, error: `This collab requires collab-plugin >= ${minRequired}; this install is on ${localVersion}. Upgrade and retry.` };
+}
+
+// Read the plugin version from <plugin-root>/<harness-manifest>/plugin.json.
+// Walks the same env var chain as detectHarness() so Codex/Gemini agents resolve correctly.
+// CI enforces lockstep across all three manifests, so whichever resolves yields the same version.
+// Defaults to '0.0.0' when nothing resolves — version check then fails loudly.
+export function readLocalPluginVersion() {
+  const candidates = [
+    { env: 'CODEX_PLUGIN_ROOT',  manifest: '.codex-plugin/plugin.json'  },
+    { env: 'GEMINI_PLUGIN_ROOT', manifest: '.gemini-plugin/plugin.json' },
+    { env: 'CLAUDE_PLUGIN_ROOT', manifest: '.claude-plugin/plugin.json' },
+    { env: 'COLLAB_PLUGIN_ROOT', manifest: '.claude-plugin/plugin.json' },
+  ];
+  for (const { env, manifest } of candidates) {
+    const root = process.env[env];
+    if (!root) continue;
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, manifest), 'utf8'));
+      if (pkg.version) return pkg.version;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return '0.0.0';
+}
+
+// --- Git transport ---
+
+// repoForTransport: parent of the collabs/ dir for a github:<repo> transport.
+// Throws if called on a non-git transport (localhost) — callers must guard with isGitTransport.
+function repoForTransport(transport) {
+  const p = parseTransport(transport);
+  if (!p || p.kind !== 'github') {
+    throw new Error(`git helpers require a github transport; got ${transport}`);
+  }
+  return dirname(collabsRootForTransport(transport));
+}
+
+export function gitPullRebase(transport) {
+  const repo = repoForTransport(transport);
+  const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
+}
+
+export function gitCommitPush(collabDir, transport, commitMsg) {
+  const repo = repoForTransport(transport);
+  spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8' });
+  spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8' });
+  for (let i = 1; i <= 3; i++) {
+    const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8' });
+    if (push.status === 0) return;
+    spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+  }
+  throw new Error(`git push failed after 3 attempts in ${repo}`);
 }

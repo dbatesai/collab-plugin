@@ -10,6 +10,25 @@ A collab is a bounded, autonomous, multi-agent conversation aimed at a stated ou
 
 **Autonomy model:** after the human says "look at slug X" to each participating agent, the collab runs without further human input. The agents coordinate via the event log; safety nets (wall-clock, stall, objection-deadlock) bound runaway. The user touches the system exactly twice per collab: once to kick off, once per other agent to invite them in.
 
+## Transports
+
+A *transport* is the channel a collab runs over. v0.2 ships two:
+
+- **`localhost`** — same-filesystem. Events live at `~/.collab/local/`. No git. Default tick cadence: 2 minutes. Best for agents on the same Mac.
+- **`github:<repo>`** — git-mediated. Events live at `~/Documents/Projects/<repo>/collabs/`. Default tick cadence: 30 minutes. Best for cross-machine collabs.
+
+The transport is set at kickoff and cannot change for the lifetime of the collab. If any participant is on a different machine, choose `github:<repo>` at kickoff.
+
+Slugs are unique across all transports — kickoff fails if the slug exists anywhere.
+
+```
+/collab discuss the architecture                 # defaults to github:files (v0.1.x behavior preserved)
+/collab localhost discuss the architecture       # same-machine collab, faster cadence
+/collab github:files look at slug memory-arch    # explicit transport on rejoin
+```
+
+The transport prefix is optional on every route. On kickoff, omitting it picks `github:files`. On join, tick, status, and abort, the router auto-resolves the transport from disk by finding the slug — the prefix is informational and rarely needed.
+
 ## Quick install
 
 ### Repo shape
@@ -45,8 +64,8 @@ Gemini install follows the same single-plugin-root pattern via `.gemini-plugin/p
 
 - **core-plugin** installed on each participating agent (v0.1 assumes CORE conventions for identity, workspace meta, and `/loop`).
 - **Node.js 18+** on each machine.
-- **`gh` CLI** authenticated with push access to the files repo.
-- **Files repo** cloned at `~/Documents/Projects/files/` with standing pull/push permissions for the running agent.
+- For `github:<repo>` transport: **`gh` CLI** authenticated with push access to the repo, and the repo cloned locally at `~/Documents/Projects/<repo>/` with standing pull/push permissions for the running agent. (The default `github:files` transport assumes `~/Documents/Projects/files/`.)
+- For `localhost` transport: nothing extra — the `~/.collab/local/` directory is created on first kickoff.
 
 ## For agents: how to participate
 
@@ -71,16 +90,16 @@ node ${GEMINI_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "..."
 
 ### The lifecycle, as a joiner
 
-1. The user tells you: *"Look at slug `<slug>` in the files repo."* You run `/collab "look at slug <slug>"`.
-2. The router detects this is a `join` route (the slug exists in `~/Documents/Projects/files/collabs/<date>-<slug>/`; you haven't emitted a `join` event yet).
-3. You read `KICKOFF.md` (rendered) and the kickoff event in `events.jsonl` (canonical). You read your own `<workspace>/_collab/capabilities.yaml`.
+1. The user tells you: *"Look at slug `<slug>` in the files repo."* You run `/collab "look at slug <slug>"`. (For a localhost collab the user says *"look at slug `<slug>` on localhost"* and you run `/collab localhost look at slug <slug>` — the transport prefix tells the router to look in `~/.collab/local/` instead of the files repo.)
+2. The router detects this is a `join` route (the slug exists in `~/Documents/Projects/files/collabs/<date>-<slug>/` or `~/.collab/local/<date>-<slug>/`, depending on transport; you haven't emitted a `join` event yet).
+3. You read `KICKOFF.md` (rendered) and the kickoff event under `events/` (canonical). You read your own `<workspace>/_collab/capabilities.yaml`.
 4. You compare the kickoff's `capabilities_wanted` against your capabilities — as a **hint, not a gate**. The real question is: *do I have something useful to add, or would I just be agreeing?*
-5. **Yes** → emit a `join` event with `capability_match` (which of your capabilities apply here) and `commitment` (a one-line statement of what you're going to contribute). Then self-start your own `/loop 30m /collab "look at slug <slug>"`.
+5. **Yes** → emit a `join` event with `capability_match` (which of your capabilities apply here) and `commitment` (a one-line statement of what you're going to contribute). Then self-start your own `/loop` at the kickoff's cadence — `/loop 30m /collab "look at slug <slug>"` on a default git collab, `/loop 2m /collab "look at slug <slug>"` on a default localhost collab. The route output includes `tick_interval_minutes` so you don't have to guess.
 6. **No** → emit a `decline` event with `reason`. Don't start the loop.
 
 ### What happens on each tick
 
-Every 30 minutes, `/loop` re-fires `/collab "look at slug <slug>"`. Now the route is `tick` (you've joined; slug exists; not closed). `collab-tick.mjs` does the deterministic work — pull files repo, check safety nets, advance ratification math, surface the next decision. The script's stdout tells you what to do:
+At the kickoff's cadence (default 30 minutes on `github:<repo>`, 2 minutes on `localhost`), `/loop` re-fires `/collab "look at slug <slug>"`. Now the route is `tick` (you've joined; slug exists; not closed). `collab-tick.mjs` does the deterministic work — pull (on git transports), check safety nets, advance ratification math, surface the next decision. The script's stdout tells you what to do:
 
 | Stdout action | What it means | What you do |
 |---|---|---|
@@ -256,20 +275,27 @@ If `capabilities.yaml` is missing, an agent reasons about fit from prose alone �
 
 ## File layout
 
-### Per-collab (in files repo)
+### Per-collab (location depends on transport)
+
+For `github:<repo>` transport: `~/Documents/Projects/<repo>/collabs/<YYYY-MM-DD>-<slug>/`.
+For `localhost` transport: `~/.collab/local/<YYYY-MM-DD>-<slug>/`.
 
 ```
-~/Documents/Projects/files/collabs/<YYYY-MM-DD>-<slug>/
+<collab-dir>/
 ├── KICKOFF.md            ← Initial post; written once, never modified
 ├── STATUS.md             ← Convergence tracker; re-rendered every tick
-├── events.jsonl          ← Canonical protocol surface; append-only
+├── events.jsonl          ← Rendered concatenation of events/; convenience read surface
+├── events/
+│   ├── evt-001.json      ← One file per event (canonical, append-only)
+│   ├── evt-002.json
+│   └── ...
 └── turns/
     ├── 001-home-keel.md  ← Per-turn human-readable renders
     ├── 002-work-keel.md
     └── ...
 ```
 
-`events.jsonl` is canonical. Markdown files are renders. If a render gets corrupted by a git conflict or partial push, the renderer rebuilds it from the JSONL on the next tick.
+Per-event files under `events/` are canonical. `events.jsonl` and the markdown files are renders, rebuilt from `events/` on every tick. If a render gets corrupted by a git conflict or partial push, the renderer rebuilds it from the per-event files on the next tick.
 
 ### Plugin repo
 

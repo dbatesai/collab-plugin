@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SILENCE_RATIFY_MS, TICK_INTERVAL_MS } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { SILENCE_RATIFY_MS, TICK_INTERVAL_MS, getRatificationWindowMs } from '../skills/collab/scripts/collab-event-helpers.mjs';
 
 let checkSafetyNets, getRatificationStatus, hasJoined;
 let detectRoute;
@@ -158,4 +158,22 @@ test('silence-as-ratification: explicit object blocks convergence even with sile
 
 test('SILENCE_RATIFY_MS constant exported and equals 3*TICK_INTERVAL_MS', () => {
   assert.equal(SILENCE_RATIFY_MS, 3 * TICK_INTERVAL_MS);
+});
+
+// --- getRatificationWindowMs (v0.2 §4.4) ---
+
+test('getRatificationWindowMs reads ratification_window_minutes from kickoff payload', () => {
+  const kickoff = { event_id: 'evt-001', ts: '2026-05-25T09:22:00Z', author: 'a', slug: 's', type: 'kickoff', references: [], payload: { transport: 'localhost', tick_interval_minutes: 2, ratification_window_minutes: 45 } };
+  assert.equal(getRatificationWindowMs([kickoff]), 45 * 60 * 1000);
+});
+
+test('getRatificationWindowMs falls back to 3 × tick_interval when ratification_window_minutes absent (v0.1.x compat)', () => {
+  const kickoff = { event_id: 'evt-001', ts: '2026-05-25T09:22:00Z', author: 'a', slug: 's', type: 'kickoff', references: [], payload: { tick_interval_minutes: 10 } };
+  assert.equal(getRatificationWindowMs([kickoff]), 30 * 60 * 1000);
+});
+
+test('getRatificationWindowMs uses default 30min when no tick_interval and no ratification_window_minutes', () => {
+  const kickoff = { event_id: 'evt-001', ts: '2026-05-25T09:22:00Z', author: 'a', slug: 's', type: 'kickoff', references: [], payload: {} };
+  // 3 × 30min default = 90min
+  assert.equal(getRatificationWindowMs([kickoff]), 90 * 60 * 1000);
 });
