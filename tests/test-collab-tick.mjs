@@ -181,3 +181,47 @@ test('getRatificationWindowMs uses default 30min when no tick_interval and no ra
   // 3 × 30min default = 90min
   assert.equal(getRatificationWindowMs([kickoff]), 90 * 60 * 1000);
 });
+
+// --- #3 tick-level quarantine regression (proves quarantine runs before routing) ---
+
+import { existsSync as existsSyncQ, mkdirSync as mkdirSyncQ, rmSync as rmSyncQ, readdirSync as readdirSyncQ } from 'node:fs';
+import { homedir as homedirQ } from 'node:os';
+import { join as joinQ } from 'node:path';
+import { appendEvent as appendEventQ, generateEventId as generateEventIdQ } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { tickDeterministic } from '../skills/collab/scripts/collab-tick.mjs';
+
+test('#3 regression: tickDeterministic quarantines invalid v1 events before routing', async () => {
+  const LOCAL_COLLAB_ROOT = joinQ(homedirQ(), '.collab', 'local');
+  const testSlug = 'tick-quarantine-regression';
+  const testDir = joinQ(LOCAL_COLLAB_ROOT, `2026-05-29-${testSlug}`);
+  if (!existsSyncQ(LOCAL_COLLAB_ROOT)) mkdirSyncQ(LOCAL_COLLAB_ROOT, { recursive: true });
+  mkdirSyncQ(joinQ(testDir, 'events'), { recursive: true });
+  try {
+    const ko = { event_id: generateEventIdQ(new Date().toISOString(), 'hk'), ts: new Date(Date.now()-60000).toISOString(), author: 'hk@cc:m', slug: testSlug, type: 'kickoff', references: [], payload: { message:'t', transport:'localhost', igm:{intention:'i',goal:'g',measure:'m'}, capabilities_wanted:[], wall_clock_hours:24 } };
+    appendEventQ(testDir, ko);
+    const jn = { event_id: generateEventIdQ(new Date().toISOString(), 'hk2'), ts: new Date(Date.now()-59000).toISOString(), author: 'hk@cc:m', slug: testSlug, type: 'join', references: [], payload: { capability_match:[], commitment:'ok' } };
+    appendEventQ(testDir, jn);
+
+    // v1 event with non-ISO next_update_by — quarantine target
+    const badEv = {
+      event_id: generateEventIdQ(new Date().toISOString(), 'hc'),
+      ts: new Date(Date.now()-1000).toISOString(),
+      author: 'hc@codex:m', slug: testSlug, type: 'turn', references: [],
+      payload: { schema_version: '1.0', intent: 'synthesize', state: 'working',
+        owner: 'hk@cc:m', waiting_on: null, next_update_by: '2026-05-29 1:00:00 AM EDT',
+        provenance: { emit_mode: 'interactive', harness: 'codex' }, body: 'test event' },
+    };
+    appendEventQ(testDir, badEv);
+    const badEvId = badEv.event_id;
+
+    const result = await tickDeterministic(testSlug, { workspaceId:'test', triplet:'hk@cc:m', dryRun:false });
+
+    const files = readdirSyncQ(joinQ(testDir, 'events'));
+    const quarantined = files.filter(f => f.startsWith('.quarantined-'));
+    assert.ok(quarantined.length >= 1, 'tickDeterministic should quarantine invalid v1 event before routing');
+    assert.ok(!files.includes(`${badEvId}.json`), 'original bad event removed from routing namespace');
+    assert.ok(result.action, 'tick should return an action (not crash) after quarantine');
+  } finally {
+    rmSyncQ(testDir, { recursive: true, force: true });
+  }
+});

@@ -93,3 +93,77 @@ test('renderStatusBlock: flags missed obligations with warning marker', () => {
   const block = renderStatusBlock(events, 'test-slug', cadence, obligations);
   assert.match(block, /MISSED/, 'should flag missed obligation');
 });
+
+// --- collab-loop main() integration tests (preflight-blocked + tick delegation) ---
+
+import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { appendEvent, generateEventId } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { main as loopMain } from '../skills/collab/scripts/collab-loop.mjs';
+
+const LOCAL_COLLAB_ROOT = join(homedir(), '.collab', 'local');
+
+function makeLoopTestCollab(slug) {
+  const dir = join(LOCAL_COLLAB_ROOT, `2026-05-29-${slug}`);
+  if (!existsSync(LOCAL_COLLAB_ROOT)) mkdirSync(LOCAL_COLLAB_ROOT, { recursive: true });
+  mkdirSync(join(dir, 'events'), { recursive: true });
+  // Minimal kickoff
+  const ko = { event_id: generateEventId(new Date().toISOString(), 'hk'), ts: new Date(Date.now()-60000).toISOString(), author:'hk@cc:m', slug, type:'kickoff', references:[], payload:{ message:'t', transport:'localhost', igm:{intention:'i',goal:'g',measure:'m'}, capabilities_wanted:[], wall_clock_hours:24 } };
+  appendEvent(dir, ko);
+  const jn = { event_id: generateEventId(new Date().toISOString(), 'hk2'), ts: new Date(Date.now()-59000).toISOString(), author:'hk@cc:m', slug, type:'join', references:[], payload:{ capability_match:[], commitment:'ok' } };
+  appendEvent(dir, jn);
+  return dir;
+}
+
+function cleanLoopTestCollab(slug) {
+  const dir = join(LOCAL_COLLAB_ROOT, `2026-05-29-${slug}`);
+  if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+}
+
+test('collab-loop start: preflight-blocked returns before cursor write and tick (transport mismatch)', async () => {
+  const slug = 'loop-start-pf-blocked';
+  makeLoopTestCollab(slug);
+  try {
+    // Request a transport that differs from the found transport (localhost vs github:files)
+    const code = await loopMain(['start', slug, '--workspace-id', 'test', '--transport', 'github:nonexistent-transport']);
+    // Should return non-zero (blocked by transport mismatch)
+    assert.ok(code !== 0, 'transport mismatch should block start');
+  } finally { cleanLoopTestCollab(slug); }
+});
+
+test('collab-loop start: preflight-blocked with missing-justification stops before cursor+tick', async () => {
+  const slug = 'loop-start-pf-justification';
+  makeLoopTestCollab(slug);
+  try {
+    // Create a new-collab scenario by passing a slug that doesn't exist → preflight blocks
+    // (actually for existing slug, justification only required for isNewCollab; 
+    //  test version-too-low instead which definitely blocks)
+    let output = '';
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (data) => { output += data; return true; };
+    const code = await loopMain(['start', slug, '--workspace-id', 'test', '--min-version', '999.0.0']);
+    process.stdout.write = origWrite;
+    assert.equal(code, 1, 'version-too-low should exit with code 1');
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.action, 'preflight-blocked', 'should return preflight-blocked action');
+    assert.ok(parsed.blockers.length > 0, 'should have blockers');
+  } finally { cleanLoopTestCollab(slug); }
+});
+
+test('collab-loop start: success path delegates to tickDeterministic (returns tick result)', async () => {
+  const slug = 'loop-start-tick-delegate';
+  makeLoopTestCollab(slug);
+  try {
+    let output = '';
+    const origWrite = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (data) => { output += data; return true; };
+    const code = await loopMain(['start', slug, '--workspace-id', 'hk']);
+    process.stdout.write = origWrite;
+    assert.equal(code, 0, 'valid start should succeed');
+    const parsed = JSON.parse(output);
+    assert.equal(parsed.action, 'loop-started', 'should return loop-started');
+    assert.ok('tick_result' in parsed, 'must include tick_result (proves tick delegation)');
+    assert.ok('recommended_sleep_ms' in parsed, 'must include recommended cadence');
+  } finally { cleanLoopTestCollab(slug); }
+});

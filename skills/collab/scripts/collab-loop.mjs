@@ -143,12 +143,21 @@ export async function main(argv) {
     return 2;
   }
 
-  const hit = findCollabAcrossTransports(slug);
+  // Transport binding: --transport flag narrows the search; if absent, auto-resolve.
+  let hit = findCollabAcrossTransports(slug);
+  if (transport && hit && hit.transport !== transport) {
+    process.stderr.write(`collab ${slug} exists but on transport ${hit.transport}, not ${transport}\n`);
+    return 2;
+  }
   if (!hit) { process.stderr.write(`no collab: ${slug}\n`); return 2; }
   const events = readEvents(hit.dir);
   const triplet = deriveTriplet(workspaceId || 'unknown');
   const cursorPath = cursorFilePath(triplet, slug, { transport: hit.transport });
   const state = readCursorState(cursorPath, triplet, slug, hit.transport);
+
+  // Derive min-version from kickoff if not explicitly passed (HC blocker #2).
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const minVersionOpt2 = minVersionOpt ?? kickoff?.payload?.min_collab_plugin_version ?? null;
 
   const nowIso = new Date().toISOString();
   const lastEvent = events[events.length - 1];
@@ -158,7 +167,7 @@ export async function main(argv) {
     // v1.0 #2: preflight gate before entering the loop.
     // collab-loop start is the preflight/cursor wrapper around the existing tick semantics,
     // NOT a second tick brain. It validates the preconditions, then delegates to tickDeterministic.
-    const pf = runPreflight({ slug, minVersion: minVersionOpt, justification: justificationOpt });
+    const pf = runPreflight({ slug, minVersion: minVersionOpt2, justification: justificationOpt });
     if (!pf.pass) {
       console.log(JSON.stringify({ action: 'preflight-blocked', blockers: pf.blockers, warnings: pf.warnings }, null, 2));
       return 1;
