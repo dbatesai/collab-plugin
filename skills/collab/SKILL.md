@@ -231,6 +231,98 @@ The message named a slug-shaped string that doesn't match any known collab. Eith
 
 Don't guess silently.
 
+---
+
+## v1.0 Loop Protocol
+
+The v1.0 loop replaces the manual `/collab "look at slug X"` pattern with a managed loop command. If you're participating in a v1.0 collab (schema_version: '1.0' events), use this instead.
+
+### Starting and running the loop
+
+```bash
+# Start the loop (runs preflight, writes cursor state, delegates to tick)
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-loop.mjs start <slug> --workspace-id <id>
+
+# See current status, cadence, and who owes what
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-loop.mjs status <slug> --workspace-id <id>
+
+# Save cursor and exit (does NOT close the collab)
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-loop.mjs stop <slug> --workspace-id <id>
+```
+
+`start` returns JSON with `action: "loop-started"`, a `tick_result` (the routing decision from the existing tick path), `recommended_sleep_ms`, and the current per-participant `obligations`. Use `recommended_sleep_ms` to set your next re-entry interval — the cadence ladder starts fast (30s) and backs off to 5 minutes when nothing is happening.
+
+Re-enter by calling `start` again. The command does NOT block-sleep; your harness drives the cadence. On Claude Code, `ScheduleWakeup` or `/loop` at the recommended interval works. On Codex, supervised re-entry at the same interval.
+
+### The next_update_by contract
+
+Every `turn` event you emit MUST include `next_update_by` as a **machine-parseable ISO 8601 UTC timestamp** in the payload schema field:
+
+```json
+{
+  "payload": {
+    "next_update_by": "2026-05-29T06:00:00Z",
+    "next_update_by_local": "2026-05-29 2:00:00 AM EDT"
+  }
+}
+```
+
+- `next_update_by` is the schema field — **always ISO 8601** (`YYYY-MM-DDTHH:MM:SSZ`). Never a human-readable string. The chase logic, drift tracking, and obligation displays all parse this field; a human string silently breaks them.
+- `next_update_by_local` (optional) carries the human-readable version for display in event bodies. Use your system's 12-hour local time with timezone abbreviation.
+- If you have no firm commitment, use an empty string (`""`) — that's valid and means "no declared deadline."
+
+Set a realistic deadline. Setting it far in the future to avoid chases defeats the accountability mechanism. A 20–30 minute window for plan work, 5 minutes for quick factual replies.
+
+### What counts as a substantive turn vs a heartbeat
+
+**Heartbeats are prohibited.** Do not emit a turn event just to say "I'm still here" or "working on it" with no content. The loop's fast-poll window keeps both sides checking frequently — a heartbeat wastes an event slot and pollutes the obligation tracking.
+
+**Substantive** means the body contributes something: a decision, a critique, a question, a plan fragment, a finding, a revised spec, a test result. If you genuinely have nothing new, emit nothing — the stall safety net handles real silence. If you're actively working but not ready to post results yet, extend your `next_update_by` in a single-sentence update event.
+
+**Signs your turn might be a heartbeat:**
+- Body under 20 words
+- No code, plan text, decision, or finding
+- Pure status report: "Still working on X" (if that's all you have to say, wait)
+
+### Chase events
+
+If you miss your `next_update_by` plus a 5-minute grace period, the other side's tick automatically emits a `chase` event with `signals: ["chase", "obligation-missed", "<your-triplet>"]`. When you see one of these:
+
+1. You owe a substantive turn — emit one immediately
+2. Set a new `next_update_by` in your response
+3. The chase will stop when you post something
+
+The flood limit is 3 chase events per participant per 60-minute window, so prolonged silence will stop generating chases after 3 — but that doesn't mean the obligation has been forgotten.
+
+### v1.0 typed payload (for v1 emitters)
+
+If you're emitting v1 events (`schema_version: '1.0'`), turn payloads require these fields:
+
+```json
+{
+  "schema_version": "1.0",
+  "intent": "propose|critique|probe|synthesize|clarify",
+  "state": "working|blocked|verifying|done",
+  "owner": "<triplet-of-next-action-owner>",
+  "waiting_on": "<triplet-or-null>",
+  "next_update_by": "2026-05-29T06:00:00Z",
+  "provenance": {
+    "emit_mode": "interactive|supervised|automated",
+    "harness": "claude-code|codex|gemini"
+  },
+  "body": "...",
+  "signals": []
+}
+```
+
+Missing any of `state`, `owner`, `waiting_on`, or `next_update_by` causes the event to be quarantined before routing — it won't be seen by the other side until you post a valid replacement. Legacy v0.2 events (no `schema_version`) still route but receive a warning.
+
+`state` values mean what they say: `working` = you're actively on it, `blocked` = waiting on something, `verifying` = reviewing/testing, `done` = your contribution to this topic is complete.
+
+`owner` names who should act next. If you're posing a question that needs a response from HC, set `owner: <hc-triplet>`. If you're waiting on yourself, set `owner: <your-triplet>`.
+
+---
+
 ## References
 
 - `references/capabilities.md` — starter capability vocabulary
@@ -240,7 +332,7 @@ Don't guess silently.
 
 - Per-event files under `events/` are canonical; `events.jsonl` and markdown files are renders (rebuilt from `events/` on next tick)
 - Transport is set at kickoff and immutable for the collab's lifetime. `localhost` keeps state at `~/.collab/local/`; `github:<repo>` at `~/Documents/Projects/<repo>/collabs/`. Slugs are unique across all transports.
-- Agents only emit events when they have something to say — no heartbeat events
+- Agents only emit events when they have something to say — no heartbeat events. See "v1.0 Loop Protocol §What counts as a substantive turn" for the concrete test.
 - Three safety nets bound runaway: wall-clock (24h default), stall (6 × tick cadence collective silence), objection-deadlock (3 propose-object cycles)
 - **Safety nets scale with the kickoff's `tick_interval_minutes`** (default 30 on git, 2 on localhost): a 5-min-cadence collab stalls at 30 min of silence and treats 15 min of post-propose-close silence as implicit ratification; a 30-min-cadence collab stalls at 3 hours and ratifies silence at 90 min. The kickoff event is the source of truth; safety-net thresholds are computed from it per tick. `ratification_window_minutes` can be set independently on kickoff; localhost has a 30-min floor.
 - `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort)
