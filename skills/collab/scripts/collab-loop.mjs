@@ -25,6 +25,8 @@ import {
   cursorFilePath, readCursorState, writeCursorState,
   computeCadence, activateFastPollWindow, updateCommitmentTracking,
 } from './collab-cadence.mjs';
+import { runPreflight } from './collab-preflight.mjs';
+import { tickDeterministic } from './collab-tick.mjs';
 
 const GRACE_MINUTES = 5;
 
@@ -125,16 +127,19 @@ export function renderStatusBlock(events, slug, cadence, obligations) {
   return lines.join('\n');
 }
 
-export function main(argv) {
+export async function main(argv) {
   const sub = argv[0];
   let slug = null, workspaceId = null, transport = null;
+  let minVersionOpt = null, justificationOpt = null;
   for (let i = 1; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
     else if (argv[i] === '--transport') transport = argv[++i];
+    else if (argv[i] === '--min-version') minVersionOpt = argv[++i];
+    else if (argv[i] === '--justification') justificationOpt = argv[++i];
     else if (!argv[i].startsWith('--') && slug === null) slug = argv[i];
   }
   if (!sub || !slug) {
-    process.stderr.write('usage: collab-loop.mjs <start|status|stop> <slug> [--workspace-id <id>]\n');
+    process.stderr.write('usage: collab-loop.mjs <start|status|stop> <slug> [--workspace-id <id>] [--justification <reason>]\n');
     return 2;
   }
 
@@ -150,19 +155,38 @@ export function main(argv) {
   const lastEventAt = lastEvent ? lastEvent.ts : null;
 
   if (sub === 'start') {
+    // v1.0 #2: preflight gate before entering the loop.
+    // collab-loop start is the preflight/cursor wrapper around the existing tick semantics,
+    // NOT a second tick brain. It validates the preconditions, then delegates to tickDeterministic.
+    const pf = runPreflight({ slug, minVersion: minVersionOpt, justification: justificationOpt });
+    if (!pf.pass) {
+      console.log(JSON.stringify({ action: 'preflight-blocked', blockers: pf.blockers, warnings: pf.warnings }, null, 2));
+      return 1;
+    }
+    if (pf.warnings.length > 0) {
+      process.stderr.write(`[collab-loop] preflight warnings:\n${pf.warnings.map(w => `  ${w.code}: ${w.message}`).join('\n')}\n`);
+    }
+
     // Init/refresh cursor; activate fast-poll so the loop starts responsive.
     activateFastPollWindow(state, new Date(nowIso));
     if (lastEvent) state.last_seen_event_id = lastEvent.event_id;
     writeCursorState(cursorPath, state);
     const cadence = computeCadence(state, lastEventAt, new Date(nowIso));
     const obligations = computeObligations(events, nowIso);
+
+    // Delegate to tickDeterministic — this is where routing actually happens.
+    // start returns the tick result so the harness knows what to do next.
+    const tickResult = await tickDeterministic(slug, { workspaceId: workspaceId || 'unknown', triplet });
     console.log(JSON.stringify({
-      action: 'loop-started', slug, triplet,
+      action: 'loop-started',
+      tick_result: tickResult,
+      slug, triplet,
       cursor_path: cursorPath,
       recommended_sleep_ms: cadence.sleepMs,
       cadence_mode: cadence.mode,
       cadence_reason: cadence.reason,
       obligations,
+      preflight_warnings: pf.warnings,
       note: 'Harness drives re-entry at recommended_sleep_ms. This command does not block-sleep.',
     }, null, 2));
     return 0;
@@ -192,4 +216,6 @@ export function main(argv) {
 }
 
 const _c = p => { try { return realpathSync(p); } catch { return p; } };
-if (_c(process.argv[1]) === _c(fileURLToPath(import.meta.url))) process.exit(main(process.argv.slice(2)));
+if (_c(process.argv[1]) === _c(fileURLToPath(import.meta.url))) {
+  main(process.argv.slice(2)).then(code => process.exit(code ?? 0));
+}
