@@ -18,11 +18,29 @@ import {
   findCollabAcrossTransports, readEvents, nextEventId, appendEvent,
   deriveTriplet, hasJoined, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
+  getJoinedAgents,
   gitPullRebase, gitCommitPush,
   checkMinVersion, readLocalPluginVersion,
+  detectHarness,
 } from './collab-event-helpers.mjs';
 import { isGitTransport } from './transport.mjs';
 import { render } from './collab-render.mjs';
+import { quarantineInvalidV1Events } from './collab-v1-quarantine.mjs';
+
+/** Render 12-hour local system time with full date, seconds, and real tz abbrev. */
+function localTimeStr(iso) {
+  if (!iso) return '(none)';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const parts = new Intl.DateTimeFormat('en-US', {
+      hour12: true, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+    }).formatToParts(d);
+    const get = (t) => (parts.find(p => p.type === t)?.value ?? '');
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${get('dayPeriod')} ${get('timeZoneName')}`;
+  } catch { return iso; }
+}
 
 function transportFromEvents(events) {
   const k = events.find(e => e.type === 'kickoff');
@@ -54,6 +72,10 @@ export async function tickDeterministic(slug, options = {}) {
   const hit = findCollabAcrossTransports(slug);
   if (!hit) throw new Error(`no collab directory for slug: ${slug}`);
   const dir = hit.dir;
+  // v1.0 #3: quarantine invalid v1 events before routing so chase/tick logic
+  // never operates on malformed or non-ISO-timestamp events. readEvents then
+  // skips the .quarantined- dotfiles, so the routing sees only valid events.
+  if (!dryRun) quarantineInvalidV1Events(dir);
   const events = readEvents(dir);
   const transport = transportFromEvents(events);
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
@@ -109,8 +131,77 @@ export async function tickDeterministic(slug, options = {}) {
     return { action: 'close', reason: 'converged', event: ev };
   }
 
+  // v1.0 #6: deterministic chase emission before handing off to LLM.
+  // Check per-participant obligations; emit chase events for missed + grace-elapsed
+  // participants. Flood-limited to 3 chase events per participant per 60 minutes.
+  const chaseEvents = [];
+  if (route === 'turn-or-propose') {
+    const joined = getJoinedAgents(events);
+    const nowDate = new Date(nowTs);
+    for (const participant of joined) {
+      if (participant === triplet) continue; // don't chase ourselves
+      const theirEvents = events.filter(e => e.author === participant && e.type === 'turn');
+      const last = theirEvents[theirEvents.length - 1];
+      if (!last?.payload?.next_update_by) continue; // no commitment → no chase
+      // Only chase on strict ISO 8601 deadlines — human-readable strings (e.g., '1:00 AM EDT')
+      // can be parsed by new Date() but are unreliable and represent the HC watcher interop bug.
+      // Skipping them here means non-ISO timestamps don't trigger spurious chases.
+      const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+      if (!ISO_8601_RE.test(last.payload.next_update_by)) continue;
+      const deadline = new Date(last.payload.next_update_by);
+      const gracePeriodMs = 5 * 60 * 1000;
+      if (nowDate - deadline < gracePeriodMs) continue; // within grace → no chase yet
+      const driftSeconds = Math.round((nowDate - deadline) / 1000);
+
+      // Flood limit: count recent chase events targeting this participant in last 60 min
+      const floodWindow = 60 * 60 * 1000;
+      const recentChases = events.filter(e =>
+        e.type === 'turn' && e.author === triplet &&
+        Array.isArray(e.payload?.signals) && e.payload.signals.includes('chase') &&
+        e.payload.signals.includes(participant) &&
+        (nowDate - new Date(e.ts)) < floodWindow
+      );
+      if (recentChases.length >= 3) continue; // flood limit hit → skip
+
+      const harness = detectHarness();
+      const chaseEv = {
+        event_id: nextEventId([...events, ...chaseEvents]),
+        ts: nowTs, author: triplet, slug,
+        type: 'turn', references: [last.event_id],
+        payload: {
+          schema_version: '1.0',
+          intent: 'clarify', state: 'blocked',  // obligation-missed → blocked on other participant
+          owner: participant, waiting_on: participant,
+          next_update_by: '', // HK has no commitment here — chase is a system event
+          body: `Obligation missed: ${participant} expected update by ${localTimeStr(last.payload.next_update_by)}. ` +
+                `Drift: ${Math.round(driftSeconds / 60)} min. State unknown.`,
+          participant_obligation: {
+            participant, drift_seconds: driftSeconds,
+            last_committed_next_update_by: last.payload.next_update_by,
+            commitment_drift_state: driftSeconds > gracePeriodMs / 1000 ? 'missed' : 'late',
+          },
+          signals: ['chase', 'obligation-missed', participant],
+          provenance: {
+            emit_mode: 'automated',
+            harness,
+            machine: process.env.HOSTNAME || process.env.COMPUTERNAME || 'unknown',
+            plugin_version: readLocalPluginVersion(),
+            install_source: 'cache-path',
+          },
+        },
+      };
+      chaseEvents.push(chaseEv);
+    }
+    if (!dryRun && chaseEvents.length > 0) {
+      for (const ev of chaseEvents) appendEvent(dir, ev);
+      if (isGitTransport(transport)) {
+        gitCommitPush(dir, transport, `[${triplet}] chase: ${chaseEvents.length} obligation(s) missed ${slug}`);
+      }
+    }
+  }
+
   // LLM-decision routes: return a hint, let the agent take over
-  return { action: 'agent-decision-needed', route, triplet, slug };
+  return { action: 'agent-decision-needed', route, triplet, slug, chase_events_emitted: chaseEvents.length };
 }
 
 export function main(argv) {

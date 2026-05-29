@@ -88,14 +88,26 @@ export function deriveSlug(message) {
 
 // --- Event ID ---
 
-// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<4-hex-random>.
-// Lexicographic sort on filename = chronological order (no central counter).
+// Monotonic per-process counter — guarantees uniqueness for same-minute,
+// same-author IDs generated within one process (the rapid-call collision case).
+let _eidCounter = 0;
+
+// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<rand><counter>.
+// Lexicographic sort on event_id is NOT relied on for ordering — readEvents sorts
+// by `ts` then event_id (v1.0 invariant). The suffix exists only for uniqueness.
+//
+// Entropy (v1.0 fix, HC-flagged): the old randomBytes(2)=16 bits collided on rapid
+// same-minute calls (birthday paradox at ~100 IDs/minute). Now: 4 hex bytes of
+// randomness PLUS a base36 per-process counter, so two IDs from one process never
+// collide and cross-process collision needs a 32-bit clash in the same minute.
+// Format invariant preserved: evt-<minute-stamp>-<author>-<suffix>.
 export function generateEventId(tsIso, authorSlug) {
   const d = new Date(tsIso);
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
-  const rand = randomBytes(2).toString('hex');
-  return `evt-${stamp}-${authorSlug}-${rand}`;
+  const rand = randomBytes(4).toString('hex');
+  const seq = (_eidCounter++ % 1296).toString(36).padStart(2, '0'); // 2 base36 chars
+  return `evt-${stamp}-${authorSlug}-${rand}${seq}`;
 }
 
 // --- Triplet ---
@@ -195,7 +207,10 @@ export function readEvents(collabDir) {
   if (existsSync(eventsDir)) {
     const seen = new Map(); // event_id → event (first wins on dup)
     for (const name of readdirSync(eventsDir)) {
-      if (!name.endsWith('.json') || name.startsWith('.tmp-')) continue;
+      // Skip non-JSON and dot-prefixed artifacts: .tmp- (in-flight writes),
+      // .quarantined- (v1 invalid events), .superseded- (quarantine originals).
+      // Any dotfile is a non-routing artifact beside the event store.
+      if (!name.endsWith('.json') || name.startsWith('.')) continue;
       const path = join(eventsDir, name);
       try {
         const content = readFileSync(path, 'utf8');
@@ -407,20 +422,38 @@ function cmpSemver(a, b) {
 
 // Compare local installed version against minimum required. Returns {ok, error?}.
 // When minRequired is undefined/null/empty, the check passes (v0.1.x compat).
+// Accepts localVersion as either a plain string ('0.2.0') OR a metadata object
+// ({ version, source, confidence }) per v1.0 plan §8 — preserves legacy callers.
 export function checkMinVersion(localVersion, minRequired) {
   if (!minRequired) return { ok: true };
-  const local = parseSemver(localVersion);
+  const localStr = (localVersion && typeof localVersion === 'object')
+    ? localVersion.version : localVersion;
+  const local = parseSemver(localStr);
   const min = parseSemver(minRequired);
-  if (!local || !min) return { ok: false, error: `version parse error (local=${localVersion}, min=${minRequired})` };
+  if (!local || !min) return { ok: false, error: `version parse error (local=${localStr}, min=${minRequired})` };
   if (cmpSemver(local, min) >= 0) return { ok: true };
-  return { ok: false, error: `This collab requires collab-plugin >= ${minRequired}; this install is on ${localVersion}. Upgrade and retry.` };
+  return { ok: false, error: `This collab requires collab-plugin >= ${minRequired}; this install is on ${localStr}. Upgrade and retry.` };
 }
 
 // Read the plugin version from <plugin-root>/<harness-manifest>/plugin.json.
 // Walks the same env var chain as detectHarness() so Codex/Gemini agents resolve correctly.
 // CI enforces lockstep across all three manifests, so whichever resolves yields the same version.
-// Defaults to '0.0.0' when nothing resolves — version check then fails loudly.
+//
+// Fallback chain (in order):
+// 1. Env var roots (CODEX_PLUGIN_ROOT, GEMINI_PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, COLLAB_PLUGIN_ROOT)
+// 2. Path-based: extract version from install cache path when env vars absent (Bash tool context)
+//    e.g., ~/.claude/plugins/cache/collab/collab/0.2.0/skills/collab/scripts/...
+// 3. Default '0.0.0' — version check fails loudly.
 export function readLocalPluginVersion() {
+  // Legacy string-returning surface — preserved for v0.2 callers and tests.
+  return readLocalPluginVersionInfo().version;
+}
+
+// v1.0 plan §8: version detection with provenance metadata.
+// Returns { version, source, confidence }:
+//   source: 'env-var:<NAME>' | 'cache-path' | 'fallback'
+//   confidence: 'high' (manifest via env) | 'medium' (cache-path regex) | 'none'
+export function readLocalPluginVersionInfo() {
   const candidates = [
     { env: 'CODEX_PLUGIN_ROOT',  manifest: '.codex-plugin/plugin.json'  },
     { env: 'GEMINI_PLUGIN_ROOT', manifest: '.gemini-plugin/plugin.json' },
@@ -432,12 +465,22 @@ export function readLocalPluginVersion() {
     if (!root) continue;
     try {
       const pkg = JSON.parse(readFileSync(join(root, manifest), 'utf8'));
-      if (pkg.version) return pkg.version;
+      if (pkg.version) return { version: pkg.version, source: `env-var:${env}`, confidence: 'high' };
     } catch {
       // try the next candidate
     }
   }
-  return '0.0.0';
+  // Fallback: extract version from the script's own install cache path.
+  // Handles the case where env vars are not injected (e.g., agent Bash tool calls).
+  // Pattern: /.../plugins/cache/<scope>/<name>/<version>/...
+  try {
+    const selfPath = fileURLToPath(import.meta.url);
+    const match = selfPath.match(/\/plugins\/cache\/[^/]+\/[^/]+\/(\d+\.\d+\.\d+)\//);
+    if (match) return { version: match[1], source: 'cache-path', confidence: 'medium' };
+  } catch {
+    // import.meta.url unavailable (CommonJS context); skip
+  }
+  return { version: '0.0.0', source: 'fallback', confidence: 'none' };
 }
 
 // --- Git transport ---

@@ -64,4 +64,12 @@ jobs:
             node --input-type=module -e "await import('./$f');" 2>&1 || fail=1
           done; exit $fail
       - name: Unit tests
-        run: node --test tests/*.mjs 2>&1
+        env:
+          # Non-interactive git so any accidental network git call fails fast
+          # instead of blocking on a credential prompt (no TTY in CI).
+          GIT_TERMINAL_PROMPT: "0"
+          GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=5"
+          GIT_ASKPASS: "true"
+        # --test-timeout names any single hanging test; `timeout` caps the whole
+        # step so a hang surfaces as a fast, diagnosable failure (not a 6h stall).
+        run: timeout 240 node --test --test-timeout=30000 tests/*.mjs 2>&1

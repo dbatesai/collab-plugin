@@ -1,6 +1,6 @@
 {
   "name": "collab",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "collab-plugin — autonomous multi-agent collaboration. /collab [transport] <message>; kickoff/join/tick/status/abort routing; two transports (localhost + github:<repo>); one-event-per-file event store; cross-machine + cross-harness.",
   "author": {
     "name": "David Bates",

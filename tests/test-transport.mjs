@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -65,10 +65,17 @@ test('preflightTransport succeeds on writable directory', () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test('preflightTransport reports error when root cannot be created', () => {
-  const r = preflightTransport.__withRoot('/proc/cannot-create-here');
-  assert.equal(r.ok, false);
-  assert.ok(r.error && r.error.length > 0);
+test('preflightTransport reports error when root is not a directory', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'preflight-bad-'));
+  const notDir = join(tmp, 'not-a-dir');
+  writeFileSync(notDir, 'file, not directory');
+  try {
+    const r = preflightTransport.__withRoot(notDir);
+    assert.equal(r.ok, false);
+    assert.ok(r.error && r.error.length > 0);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('detectHarness defaults to claude-code with no env vars', () => {
