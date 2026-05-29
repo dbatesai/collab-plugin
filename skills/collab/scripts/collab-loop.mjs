@@ -38,13 +38,24 @@ export function localTime(iso) {
   if (!iso) return '(none)';
   try {
     const d = new Date(iso);
-    // Local 12-hour with seconds; timeZoneName:'short' yields the real abbrev (EDT/PST/UTC/etc.)
-    return d.toLocaleString('en-US', {
+    if (isNaN(d.getTime())) return iso;
+    // Target shape: "2026-05-29 1:10:00 AM EDT"
+    //   - ISO-like date YYYY-MM-DD (local)
+    //   - 12-hour clock, NO leading-zero hour
+    //   - seconds always shown
+    //   - real local timezone abbreviation (EDT/PST/UTC/...)
+    const parts = new Intl.DateTimeFormat('en-US', {
       hour12: true,
       year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      hour: 'numeric', minute: '2-digit', second: '2-digit',
       timeZoneName: 'short',
-    });
+    }).formatToParts(d);
+    const get = (t) => (parts.find(p => p.type === t)?.value ?? '');
+    const yyyy = get('year'), mm = get('month'), dd = get('day');
+    const hour = get('hour'), min = get('minute'), sec = get('second');
+    const ampm = get('dayPeriod'); // 'AM' | 'PM'
+    const tz = get('timeZoneName'); // 'EDT' etc.
+    return `${yyyy}-${mm}-${dd} ${hour}:${min}:${sec} ${ampm} ${tz}`;
   } catch { return iso; }
 }
 

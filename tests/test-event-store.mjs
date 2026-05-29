@@ -15,16 +15,20 @@ function mkCollabDir() {
   return dir;
 }
 
-test('generateEventId produces YYYYMMDDHHmm-<author>-<4hex> format', () => {
+test('generateEventId produces minute-precision YYYYMMDDHHmm-<author>-<suffix> format', () => {
   const id = generateEventId('2026-05-25T09:22:00Z', 'core-gemini');
-  assert.match(id, /^evt-202605250922-core-gemini-[0-9a-f]{4}$/);
+  // v1.0 entropy fix: suffix is 8 hex (randomBytes(4)) + 2 base36 (per-process
+  // counter) for collision resistance. Minute-precision stamp + author preserved.
+  assert.match(id, /^evt-202605250922-core-gemini-[0-9a-f]{8}[0-9a-z]{2}$/);
 });
 
-test('generateEventId is unique across rapid calls', () => {
+test('generateEventId is unique across rapid calls (was probabilistic-collision flake)', () => {
   const ts = '2026-05-25T09:22:00Z';
   const ids = new Set();
-  for (let i = 0; i < 100; i++) ids.add(generateEventId(ts, 'core-hk'));
-  assert.equal(ids.size, 100);
+  // 1000 (not 100) to make any residual collision surface; per-process counter
+  // guarantees uniqueness for same-minute same-author within one process.
+  for (let i = 0; i < 1000; i++) ids.add(generateEventId(ts, 'core-hk'));
+  assert.equal(ids.size, 1000);
 });
 
 test('appendEvent writes a single JSON file in events/ via atomic rename', () => {

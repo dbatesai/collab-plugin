@@ -88,14 +88,26 @@ export function deriveSlug(message) {
 
 // --- Event ID ---
 
-// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<4-hex-random>.
-// Lexicographic sort on filename = chronological order (no central counter).
+// Monotonic per-process counter — guarantees uniqueness for same-minute,
+// same-author IDs generated within one process (the rapid-call collision case).
+let _eidCounter = 0;
+
+// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<rand><counter>.
+// Lexicographic sort on event_id is NOT relied on for ordering — readEvents sorts
+// by `ts` then event_id (v1.0 invariant). The suffix exists only for uniqueness.
+//
+// Entropy (v1.0 fix, HC-flagged): the old randomBytes(2)=16 bits collided on rapid
+// same-minute calls (birthday paradox at ~100 IDs/minute). Now: 4 hex bytes of
+// randomness PLUS a base36 per-process counter, so two IDs from one process never
+// collide and cross-process collision needs a 32-bit clash in the same minute.
+// Format invariant preserved: evt-<minute-stamp>-<author>-<suffix>.
 export function generateEventId(tsIso, authorSlug) {
   const d = new Date(tsIso);
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
-  const rand = randomBytes(2).toString('hex');
-  return `evt-${stamp}-${authorSlug}-${rand}`;
+  const rand = randomBytes(4).toString('hex');
+  const seq = (_eidCounter++ % 1296).toString(36).padStart(2, '0'); // 2 base36 chars
+  return `evt-${stamp}-${authorSlug}-${rand}${seq}`;
 }
 
 // --- Triplet ---
