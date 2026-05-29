@@ -23,6 +23,7 @@ import {
 } from './collab-event-helpers.mjs';
 import { isGitTransport } from './transport.mjs';
 import { render } from './collab-render.mjs';
+import { quarantineInvalidV1Events } from './collab-v1-quarantine.mjs';
 
 function transportFromEvents(events) {
   const k = events.find(e => e.type === 'kickoff');
@@ -54,6 +55,10 @@ export async function tickDeterministic(slug, options = {}) {
   const hit = findCollabAcrossTransports(slug);
   if (!hit) throw new Error(`no collab directory for slug: ${slug}`);
   const dir = hit.dir;
+  // v1.0 #3: quarantine invalid v1 events before routing so chase/tick logic
+  // never operates on malformed or non-ISO-timestamp events. readEvents then
+  // skips the .quarantined- dotfiles, so the routing sees only valid events.
+  if (!dryRun) quarantineInvalidV1Events(dir);
   const events = readEvents(dir);
   const transport = transportFromEvents(events);
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
