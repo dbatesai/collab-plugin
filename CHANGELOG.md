@@ -4,6 +4,29 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [1.0.0] — 2026-05-29
+
+First stable release — the v1.0 autonomous loop protocol. An agent can now start a hands-off loop instead of hand-firing each tick: it polls on a dynamic cadence ladder, chases a silent partner on a deterministic schedule, and quarantines malformed v1 events before they reach routing. The release is feature-complete with 241 passing tests, and the design was reviewed and ratified end-to-end by an independent Codex agent. The first live cross-harness exercise of the v1.0 loop is still pending — recommended right before or right after merge.
+
+### Added
+- **`collab-loop` command (start / status / stop).** Wraps `tick` with a six-point preflight and per-collab cursor tracking so a loop can run unattended. `start` runs the preflight and then delegates to the same deterministic tick logic — there is no second decision path to drift out of sync. (`collab-loop.mjs`)
+- **Dynamic polling cadence.** A three-rung ladder — fast-poll right after activity, a base interval in steady state, a slow idle interval when quiet — replaces fixed polling, giving a closer-to-pub/sub feel without a server. Cursor files encode transport, harness, machine, and the collab triplet + slug so each participant tracks its own position. (`collab-cadence.mjs`)
+- **Six-point preflight.** Before a loop starts it checks the entrypoint, the plugin version, a route dry-run, a local write, pull/rebase, and a push dry-run, and gates on a stated justification. Catches a broken install before it can flood a collab. (`collab-preflight.mjs`)
+- **v1 event quarantine and validation before routing.** A v1 event missing `state`, `owner`, `waiting_on`, `next_update_by`, or `provenance.emit_mode` — or carrying a `next_update_by` that isn't ISO-8601 — is moved aside to a dot-prefixed file before the router sees it, instead of crashing the tick. (`collab-v1-quarantine.mjs`)
+- **Deterministic chase.** When a partner misses the `next_update_by` it committed to, the loop emits a single chase after a five-minute grace, capped at three per participant per hour, stamped with the detected harness and local time. (`collab-tick.mjs`)
+- **v1.0 loop protocol section in `SKILL.md`.** Covers loop start/status/stop, the `next_update_by` contract, what counts as a heartbeat, how to answer a chase, and the v1.0 typed payload.
+
+### Changed
+- **`next_update_by` is a strict ISO-8601 timestamp.** A human-readable string like `2026-05-29 1:00:00 AM EDT` parses as a `Date` but compares wrong; the contract is now ISO-8601, validated on the way in.
+- **`generateEventId` entropy** raised to `randomBytes(4)` plus a per-process counter, removing the 16-bit collision that could produce duplicate event ids under rapid emission.
+- **`localTime`** rebuilt on `Intl.formatToParts` to emit the exact `YYYY-MM-DD h:mm:ss AM/PM TZ` format.
+- **`readEvents` skips every dot-prefixed file** (`.tmp-`, `.quarantined-`, `.superseded-`), not only `.tmp-`.
+- **`readLocalPluginVersion`** falls back to a path-based plugin-root lookup when the env-var chain doesn't resolve, and returns `{version, source, confidence}` so callers can weigh how the version was found.
+
+### Fixed
+- Tick quarantines invalid v1 events before reading the event set, closing a routing regression where one malformed event could stop the loop.
+- Removed a suite flake; the 241-test suite is deterministic.
+
 ## [0.2.0] — 2026-05-25
 
 Minor release. Transport modes (`localhost` + `github:<repo>`), one-event-per-file event store, decoupled ratification window, harness detection fallback chain, transport preflight, strict slug uniqueness, and `min_collab_plugin_version` enforcement on join.
