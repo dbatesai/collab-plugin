@@ -56,7 +56,11 @@ test('ratification not converged with pending agents', () => {
   const events = [KO, JN,
     { event_id:'evt-003', ts:T0, author:'core@cc:home', slug:'s', type:'propose-close', references:[],
       payload:{ synthesis:'x', igm_met:{} } }];
-  const s = getRatificationStatus(events);
+  // Pin nowTs to the propose-close instant — otherwise the default real-now makes
+  // this time-dependent: by any date past the silence-ratification window the
+  // pending agent is implicitly ratified and `converged` flips to true.
+  // (Found session 52: this was the lone suite flake. HC diagnosed; fix = pin nowTs.)
+  const s = getRatificationStatus(events, T0);
   assert.equal(s.converged, false);
   assert.ok(s.pending.includes('bblens@cc:work'));
 });

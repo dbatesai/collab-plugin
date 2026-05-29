@@ -29,16 +29,22 @@ import {
 const GRACE_MINUTES = 5;
 
 /**
- * Render a 12-hour local-time string with timezone (per HC's human-facing time rule).
+ * Render a 12-hour LOCAL SYSTEM time string with full date, seconds, and the
+ * actual timezone abbreviation (v1.0 plan, HC blocker #7). Does NOT hardcode a
+ * timezone — uses the host's local zone so the rendering is correct on whatever
+ * machine/harness runs it.
  */
-function localTime(iso) {
+export function localTime(iso) {
   if (!iso) return '(none)';
   try {
-    return new Date(iso).toLocaleString('en-US', {
-      timeZone: 'America/New_York', hour12: true,
+    const d = new Date(iso);
+    // Local 12-hour with seconds; timeZoneName:'short' yields the real abbrev (EDT/PST/UTC/etc.)
+    return d.toLocaleString('en-US', {
+      hour12: true,
       year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit',
-    }) + ' ET';
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+      timeZoneName: 'short',
+    });
   } catch { return iso; }
 }
 
@@ -125,7 +131,7 @@ export function main(argv) {
   if (!hit) { process.stderr.write(`no collab: ${slug}\n`); return 2; }
   const events = readEvents(hit.dir);
   const triplet = deriveTriplet(workspaceId || 'unknown');
-  const cursorPath = cursorFilePath(triplet, slug);
+  const cursorPath = cursorFilePath(triplet, slug, { transport: hit.transport });
   const state = readCursorState(cursorPath, triplet, slug, hit.transport);
 
   const nowIso = new Date().toISOString();

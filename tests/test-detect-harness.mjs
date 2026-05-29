@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectHarness, deriveTriplet, authorSlugFromTriplet, readLocalPluginVersion } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { detectHarness, deriveTriplet, authorSlugFromTriplet, readLocalPluginVersion, readLocalPluginVersionInfo, checkMinVersion } from '../skills/collab/scripts/collab-event-helpers.mjs';
 
 // Integration coverage for the detectHarness re-export and triplet helpers.
 // Raw detectHarness priority/override behavior lives in test-transport.mjs; this
@@ -78,4 +78,28 @@ test('readLocalPluginVersion: env var root takes precedence over path fallback',
     const v = readLocalPluginVersion();
     assert.match(v, /^\d+\.\d+\.\d+$/, `should be semver: got ${v}`);
   });
+});
+
+// readLocalPluginVersionInfo — provenance metadata (v1.0 §8)
+
+test('readLocalPluginVersionInfo: returns { version, source, confidence }', () => {
+  withEnv({ CODEX_PLUGIN_ROOT: null, GEMINI_PLUGIN_ROOT: null,
+    CLAUDE_PLUGIN_ROOT: null, COLLAB_PLUGIN_ROOT: null }, () => {
+    const info = readLocalPluginVersionInfo();
+    assert.ok('version' in info && 'source' in info && 'confidence' in info);
+    assert.match(info.version, /^\d+\.\d+\.\d+$/);
+    assert.ok(['high', 'medium', 'none'].includes(info.confidence));
+  });
+});
+
+test('checkMinVersion: accepts a { version } object (v1.0 §8 object-compat)', () => {
+  const ok = checkMinVersion({ version: '0.3.0', source: 'env-var:X', confidence: 'high' }, '0.2.0');
+  assert.equal(ok.ok, true, 'object form should satisfy min version');
+  const tooLow = checkMinVersion({ version: '0.1.0' }, '0.2.0');
+  assert.equal(tooLow.ok, false, 'object form below min should fail');
+});
+
+test('checkMinVersion: still accepts a plain string (legacy callers)', () => {
+  assert.equal(checkMinVersion('0.3.0', '0.2.0').ok, true);
+  assert.equal(checkMinVersion('0.1.0', '0.2.0').ok, false);
 });

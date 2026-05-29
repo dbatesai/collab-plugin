@@ -37,21 +37,41 @@ export function deriveMachineSlug() {
 }
 
 /**
+ * Slugify a transport identifier for use in a filesystem path.
+ * 'github:files' → 'github-files'; 'localhost' → 'localhost'.
+ * For github transports the repo IS the identity, so it's encoded here.
+ */
+export function encodeTransport(transport) {
+  if (!transport) return 'unknown-transport';
+  return String(transport).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+/**
  * Derive the cursor file path for a participant.
+ *
+ * Cursor identity MUST include transport + repo/root (v1.0 plan §3.1, HC blocker #1):
+ * the same triplet+slug can legitimately exist on two transports (localhost AND
+ * github:files), and they must not collide on one cursor file.
+ *
+ * Path: ~/.collab/cursors/<machine>/<harness>/<transport>/<encoded-triplet>-<slug>.json
+ *
  * @param {string} triplet — participant triplet (e.g., 'core-framework@claude-code:Jennifer-Aniston')
  * @param {string} slug — collab slug
- * @param {string} [machineSlug] — defaults to deriveMachineSlug()
+ * @param {object} [opts] — { machineSlug, transport }
  * @returns {string} Absolute path to cursor file
  */
-export function cursorFilePath(triplet, slug, machineSlug) {
-  const machine = machineSlug || deriveMachineSlug();
+export function cursorFilePath(triplet, slug, opts = {}) {
+  // Back-compat: allow opts to be a string machineSlug (old 3-arg signature).
+  const o = (typeof opts === 'string') ? { machineSlug: opts } : (opts || {});
+  const machine = o.machineSlug || deriveMachineSlug();
+  const transport = encodeTransport(o.transport || 'unknown-transport');
   // Extract harness from triplet: 'workspace@harness:machine' → 'harness'
   const harnessMatch = triplet.match(/@([^:]+):/);
   const harness = harnessMatch ? harnessMatch[1] : 'unknown-harness';
   // Encode triplet for filename: replace @ and : with -
   const encodedTriplet = triplet.replace(/@/g, '-').replace(/:/g, '-');
   const filename = `${encodedTriplet}-${slug}.json`;
-  return join(homedir(), '.collab', 'cursors', machine, harness, filename);
+  return join(homedir(), '.collab', 'cursors', machine, harness, transport, filename);
 }
 
 /**

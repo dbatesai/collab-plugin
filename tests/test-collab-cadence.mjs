@@ -117,19 +117,33 @@ test('updateCommitmentTracking: no-op when no next_update_by field', () => {
 
 // --- cursorFilePath ---
 
-test('cursorFilePath: includes machine, harness, and encoded triplet', () => {
+test('cursorFilePath: includes machine, harness, transport, and encoded triplet', () => {
   const triplet = 'core-framework@claude-code:Jennifer-Aniston';
-  const path = cursorFilePath(triplet, 'my-slug', 'test-machine');
+  const path = cursorFilePath(triplet, 'my-slug', { machineSlug: 'test-machine', transport: 'github:files' });
   assert.ok(path.includes('test-machine'), 'should include machine slug');
   assert.ok(path.includes('claude-code'), 'should include harness');
+  assert.ok(path.includes('github-files'), 'should include encoded transport');
   assert.ok(path.includes('my-slug'), 'should include collab slug');
   assert.ok(path.endsWith('.json'), 'should end with .json');
 });
 
 test('cursorFilePath: @ and : are not in filename (encoded)', () => {
   const triplet = 'core-framework@claude-code:Jennifer-Aniston';
-  const path = cursorFilePath(triplet, 'slug', 'machine');
+  const path = cursorFilePath(triplet, 'slug', { machineSlug: 'machine', transport: 'localhost' });
   const filename = path.split('/').pop();
   assert.ok(!filename.includes('@'), 'filename should not contain @');
   assert.ok(!filename.includes(':'), 'filename should not contain :');
+});
+
+test('cursorFilePath: same triplet+slug on different transports → different paths (HC blocker #1)', () => {
+  const triplet = 'core-framework@claude-code:Jennifer-Aniston';
+  const localhost = cursorFilePath(triplet, 'slug', { machineSlug: 'm', transport: 'localhost' });
+  const github = cursorFilePath(triplet, 'slug', { machineSlug: 'm', transport: 'github:files' });
+  assert.notEqual(localhost, github, 'transport must disambiguate cursor identity — no collision');
+});
+
+test('cursorFilePath: back-compat with string machineSlug (3-arg signature)', () => {
+  const triplet = 'core-framework@claude-code:m';
+  const path = cursorFilePath(triplet, 'slug', 'legacy-machine');
+  assert.ok(path.includes('legacy-machine'), 'string opts treated as machineSlug');
 });
