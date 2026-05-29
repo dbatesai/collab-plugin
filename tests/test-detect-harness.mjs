@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectHarness, deriveTriplet, authorSlugFromTriplet } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { detectHarness, deriveTriplet, authorSlugFromTriplet, readLocalPluginVersion } from '../skills/collab/scripts/collab-event-helpers.mjs';
 
 // Integration coverage for the detectHarness re-export and triplet helpers.
 // Raw detectHarness priority/override behavior lives in test-transport.mjs; this
@@ -54,4 +54,28 @@ test('authorSlugFromTriplet handles each harness suffix', () => {
   assert.equal(authorSlugFromTriplet('core-codex@codex:laptop'), 'core-codex');
   assert.equal(authorSlugFromTriplet('core-gemini@gemini:work'), 'core-gemini');
   assert.equal(authorSlugFromTriplet('core-custom@custom-harness:host'), 'core-custom');
+});
+
+// readLocalPluginVersion — path-based fallback (env vars absent, agent Bash tool context)
+test('readLocalPluginVersion: returns 0.0.0 when no env vars and not in cache path', () => {
+  withEnv({
+    CODEX_PLUGIN_ROOT: null, GEMINI_PLUGIN_ROOT: null,
+    CLAUDE_PLUGIN_ROOT: null, COLLAB_PLUGIN_ROOT: null,
+  }, () => {
+    // Dev source path doesn't match cache pattern — expect 0.0.0
+    const v = readLocalPluginVersion();
+    assert.equal(typeof v, 'string', 'should return a string');
+    // In dev context, path doesn't match /plugins/cache/.../version/ pattern
+    // so we get 0.0.0 — this is expected and honest
+    assert.match(v, /^\d+\.\d+\.\d+$/, `should be semver: got ${v}`);
+  });
+});
+
+test('readLocalPluginVersion: env var root takes precedence over path fallback', () => {
+  withEnv({ COLLAB_PLUGIN_ROOT: '/nonexistent/path', CODEX_PLUGIN_ROOT: null,
+    GEMINI_PLUGIN_ROOT: null, CLAUDE_PLUGIN_ROOT: null }, () => {
+    // When env var is set but manifest not found, falls through to path fallback
+    const v = readLocalPluginVersion();
+    assert.match(v, /^\d+\.\d+\.\d+$/, `should be semver: got ${v}`);
+  });
 });

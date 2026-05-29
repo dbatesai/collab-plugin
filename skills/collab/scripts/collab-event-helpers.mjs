@@ -419,7 +419,12 @@ export function checkMinVersion(localVersion, minRequired) {
 // Read the plugin version from <plugin-root>/<harness-manifest>/plugin.json.
 // Walks the same env var chain as detectHarness() so Codex/Gemini agents resolve correctly.
 // CI enforces lockstep across all three manifests, so whichever resolves yields the same version.
-// Defaults to '0.0.0' when nothing resolves — version check then fails loudly.
+//
+// Fallback chain (in order):
+// 1. Env var roots (CODEX_PLUGIN_ROOT, GEMINI_PLUGIN_ROOT, CLAUDE_PLUGIN_ROOT, COLLAB_PLUGIN_ROOT)
+// 2. Path-based: extract version from install cache path when env vars absent (Bash tool context)
+//    e.g., ~/.claude/plugins/cache/collab/collab/0.2.0/skills/collab/scripts/...
+// 3. Default '0.0.0' — version check fails loudly.
 export function readLocalPluginVersion() {
   const candidates = [
     { env: 'CODEX_PLUGIN_ROOT',  manifest: '.codex-plugin/plugin.json'  },
@@ -436,6 +441,16 @@ export function readLocalPluginVersion() {
     } catch {
       // try the next candidate
     }
+  }
+  // Fallback: extract version from the script's own install cache path.
+  // Handles the case where env vars are not injected (e.g., agent Bash tool calls).
+  // Pattern: /.../plugins/cache/<scope>/<name>/<version>/...
+  try {
+    const selfPath = fileURLToPath(import.meta.url);
+    const match = selfPath.match(/\/plugins\/cache\/[^/]+\/[^/]+\/(\d+\.\d+\.\d+)\//);
+    if (match) return match[1];
+  } catch {
+    // import.meta.url unavailable (CommonJS context); skip
   }
   return '0.0.0';
 }
