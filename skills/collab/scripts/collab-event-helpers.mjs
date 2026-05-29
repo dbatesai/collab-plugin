@@ -195,7 +195,10 @@ export function readEvents(collabDir) {
   if (existsSync(eventsDir)) {
     const seen = new Map(); // event_id → event (first wins on dup)
     for (const name of readdirSync(eventsDir)) {
-      if (!name.endsWith('.json') || name.startsWith('.tmp-')) continue;
+      // Skip non-JSON and dot-prefixed artifacts: .tmp- (in-flight writes),
+      // .quarantined- (v1 invalid events), .superseded- (quarantine originals).
+      // Any dotfile is a non-routing artifact beside the event store.
+      if (!name.endsWith('.json') || name.startsWith('.')) continue;
       const path = join(eventsDir, name);
       try {
         const content = readFileSync(path, 'utf8');
