@@ -4,12 +4,30 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPreflight, PREFLIGHT_CODES } from '../skills/collab/scripts/collab-preflight.mjs';
+import { appendEvent } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { LOCAL_COLLABS_ROOT } from '../skills/collab/scripts/transport.mjs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // Derive the actual scripts/ dir from the test file's location
 const SCRIPTS_DIR = resolve(fileURLToPath(import.meta.url), '..', '..', 'skills', 'collab', 'scripts');
 const PREFLIGHT_SCRIPT = resolve(SCRIPTS_DIR, 'collab-preflight.mjs');
+
+function makeLocalCollabFixture(slug) {
+  const dirName = `2026-05-25-${slug}`;
+  const dir = join(LOCAL_COLLABS_ROOT, dirName);
+  mkdirSync(join(dir, 'events'), { recursive: true });
+  appendEvent(dir, {
+    event_id: 'evt-001',
+    ts: '2026-05-25T09:22:00Z',
+    author: 'fixture@claude-code:test',
+    slug,
+    type: 'kickoff',
+    references: [],
+    payload: { transport: 'localhost' },
+  });
+  return dir;
+}
 
 // --- 1. Entrypoint check ---
 
@@ -39,14 +57,20 @@ test('preflight #3: missing slug blocks when not a new collab', () => {
 });
 
 test('preflight: new collab with existing slug blocks (collision)', () => {
-  // Use the real live slug which we know exists
-  const res = runPreflight({
-    slug: 'keel-hk-here-starting-a-new-session-fresh-collab',
-    isNewCollab: true, justification: 'adversarial-review',
-    selfPath: PREFLIGHT_SCRIPT,
-  });
-  const b = res.blockers.find(b => b.code === PREFLIGHT_CODES.SLUG_COLLISION);
-  assert.ok(b, 'existing slug should block a new-collab kickoff');
+  const slug = `preflight-collision-${Date.now()}`;
+  const dir = makeLocalCollabFixture(slug);
+  try {
+    const res = runPreflight({
+      slug,
+      isNewCollab: true,
+      justification: 'adversarial-review',
+      selfPath: PREFLIGHT_SCRIPT,
+    });
+    const b = res.blockers.find(b => b.code === PREFLIGHT_CODES.SLUG_COLLISION);
+    assert.ok(b, 'existing synthetic fixture slug should block a new-collab kickoff');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- justification gate ---
@@ -73,37 +97,53 @@ test('preflight: new collab with justification only checks slug + justification 
 // --- 4. Local write test ---
 
 test('preflight #4: local write PASS for existing collab dir', () => {
-  // The live collab dir should be writable (we've been writing to it all session)
-  const res = runPreflight({
-    slug: 'keel-hk-here-starting-a-new-session-fresh-collab',
-    selfPath: PREFLIGHT_SCRIPT,
-    // Skip git checks to isolate the write test
-    _env: { GIT_TERMINAL_PROMPT: '0' },
-  });
-  const writeBlocker = res.blockers.find(b => b.code === PREFLIGHT_CODES.LOCAL_WRITE_FAILED);
-  assert.ok(!writeBlocker, 'live collab dir should pass local write test');
+  const slug = `preflight-write-${Date.now()}`;
+  const dir = makeLocalCollabFixture(slug);
+  try {
+    const res = runPreflight({ slug, selfPath: PREFLIGHT_SCRIPT });
+    assert.equal(res.pass, true, JSON.stringify(res, null, 2));
+    assert.ok(!res.blockers.find(b => b.code === PREFLIGHT_CODES.SLUG_NOT_FOUND), 'fixture slug should be found');
+    assert.ok(!res.blockers.find(b => b.code === PREFLIGHT_CODES.LOCAL_WRITE_FAILED), 'fixture dir should pass local write');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- version check integration ---
 
 test('preflight #2: version blocker when required version too high', () => {
-  const res = runPreflight({
-    slug: 'keel-hk-here-starting-a-new-session-fresh-collab',
-    minVersion: '999.0.0', selfPath: PREFLIGHT_SCRIPT,
-  });
-  const b = res.blockers.find(b => b.code === PREFLIGHT_CODES.VERSION_TOO_LOW);
-  assert.ok(b, 'unreachable min version should block');
-  assert.equal(res.pass, false);
+  const slug = `preflight-version-high-${Date.now()}`;
+  const dir = makeLocalCollabFixture(slug);
+  try {
+    const res = runPreflight({
+      slug,
+      minVersion: '999.0.0',
+      selfPath: PREFLIGHT_SCRIPT,
+    });
+    const b = res.blockers.find(b => b.code === PREFLIGHT_CODES.VERSION_TOO_LOW);
+    assert.ok(b, 'unreachable min version should block');
+    assert.equal(res.pass, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('preflight #2: version passes when min is satisfied (uses dev-context: 0.0.0 >= 0.0.0)', () => {
   // In dev-source context, readLocalPluginVersionInfo() returns {version:'0.0.0'} (no cache path).
   // Use minVersion '0.0.0' to prove the logic works. The cache-path fallback is tested separately
   // in test-detect-harness.mjs (it correctly extracts the version from the installed cache path).
-  const res = runPreflight({
-    slug: 'keel-hk-here-starting-a-new-session-fresh-collab',
-    minVersion: '0.0.0', selfPath: PREFLIGHT_SCRIPT,
-  });
-  const b = res.blockers.find(b => b.code === PREFLIGHT_CODES.VERSION_TOO_LOW);
-  assert.ok(!b, 'min version 0.0.0 should be satisfied by dev-source install');
+  const slug = `preflight-version-ok-${Date.now()}`;
+  const dir = makeLocalCollabFixture(slug);
+  try {
+    const res = runPreflight({
+      slug,
+      minVersion: '0.0.0',
+      selfPath: PREFLIGHT_SCRIPT,
+    });
+    const b = res.blockers.find(b => b.code === PREFLIGHT_CODES.VERSION_TOO_LOW);
+    assert.ok(!b, 'min version 0.0.0 should be satisfied by dev-source install');
+    assert.equal(res.pass, true, JSON.stringify(res, null, 2));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
