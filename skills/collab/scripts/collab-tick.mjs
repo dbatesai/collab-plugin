@@ -21,10 +21,26 @@ import {
   getJoinedAgents,
   gitPullRebase, gitCommitPush,
   checkMinVersion, readLocalPluginVersion,
+  detectHarness,
 } from './collab-event-helpers.mjs';
 import { isGitTransport } from './transport.mjs';
 import { render } from './collab-render.mjs';
 import { quarantineInvalidV1Events } from './collab-v1-quarantine.mjs';
+
+/** Render 12-hour local system time with full date, seconds, and real tz abbrev. */
+function localTimeStr(iso) {
+  if (!iso) return '(none)';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const parts = new Intl.DateTimeFormat('en-US', {
+      hour12: true, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+    }).formatToParts(d);
+    const get = (t) => (parts.find(p => p.type === t)?.value ?? '');
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')} ${get('dayPeriod')} ${get('timeZoneName')}`;
+  } catch { return iso; }
+}
 
 function transportFromEvents(events) {
   const k = events.find(e => e.type === 'kickoff');
@@ -147,16 +163,17 @@ export async function tickDeterministic(slug, options = {}) {
       );
       if (recentChases.length >= 3) continue; // flood limit hit → skip
 
+      const harness = detectHarness();
       const chaseEv = {
         event_id: nextEventId([...events, ...chaseEvents]),
         ts: nowTs, author: triplet, slug,
         type: 'turn', references: [last.event_id],
         payload: {
           schema_version: '1.0',
-          intent: 'clarify', state: 'working',
+          intent: 'clarify', state: 'blocked',  // obligation-missed → blocked on other participant
           owner: participant, waiting_on: participant,
           next_update_by: '', // HK has no commitment here — chase is a system event
-          body: `Obligation missed: ${participant} expected update by ${last.payload.next_update_by}. ` +
+          body: `Obligation missed: ${participant} expected update by ${localTimeStr(last.payload.next_update_by)}. ` +
                 `Drift: ${Math.round(driftSeconds / 60)} min. State unknown.`,
           participant_obligation: {
             participant, drift_seconds: driftSeconds,
@@ -164,7 +181,13 @@ export async function tickDeterministic(slug, options = {}) {
             commitment_drift_state: driftSeconds > gracePeriodMs / 1000 ? 'missed' : 'late',
           },
           signals: ['chase', 'obligation-missed', participant],
-          provenance: { emit_mode: 'automated', harness: 'claude-code' },
+          provenance: {
+            emit_mode: 'automated',
+            harness,
+            machine: process.env.HOSTNAME || process.env.COMPUTERNAME || 'unknown',
+            plugin_version: readLocalPluginVersion(),
+            install_source: 'cache-path',
+          },
         },
       };
       chaseEvents.push(chaseEv);

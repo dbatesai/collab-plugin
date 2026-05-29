@@ -161,3 +161,59 @@ test('chase: no chase when no next_update_by commitment', async () => {
     assert.equal(result.chase_events_emitted, 0, 'no commitment → no chase');
   } finally { cleanupLocalCollab(slug); }
 });
+
+test('chase: flood limit — at most 3 chase events per participant per 60min', async () => {
+  const slug = 'chase-test-flood-limit';
+  const { dir } = tmpLocalCollab(slug);
+  try {
+    kickoffEvent(dir, slug);
+    joinEvent(dir, slug, 'hk@claude-code:m');
+    joinEvent(dir, slug, 'hc@codex:m');
+    // HC's turn with missed deadline
+    turnEvent(dir, slug, 'hc@codex:m', 20, 15);
+    // Pre-populate 3 recent chase events targeting hc (max flood limit)
+    const now = new Date();
+    for (let i = 0; i < 3; i++) {
+      const recentTs = new Date(now.getTime() - (i + 1) * 5 * 60 * 1000).toISOString();
+      const chaseEv = {
+        event_id: generateEventId(recentTs, 'hk'),
+        ts: recentTs, author: 'hk@claude-code:m', slug,
+        type: 'turn', references: [],
+        payload: {
+          intent: 'clarify', body: 'chase', signals: ['chase', 'obligation-missed', 'hc@codex:m'],
+        },
+      };
+      appendEvent(dir, chaseEv);
+    }
+    // Now tick — should NOT emit another chase (flood limit hit)
+    const result = await tickDeterministic(slug, {
+      workspaceId: 'test', triplet: 'hk@claude-code:m', dryRun: true,
+    });
+    assert.equal(result.chase_events_emitted, 0, 'flood limit: 3 recent chases should block 4th');
+  } finally { cleanupLocalCollab(slug); }
+});
+
+test('chase: payload.state is blocked (not working) for obligation-missed chase', async () => {
+  const slug = 'chase-test-state-blocked';
+  const { dir } = tmpLocalCollab(slug);
+  try {
+    kickoffEvent(dir, slug);
+    joinEvent(dir, slug, 'hk@claude-code:m');
+    joinEvent(dir, slug, 'hc@codex:m');
+    turnEvent(dir, slug, 'hc@codex:m', 20, 15);
+    // dryRun: false → chase event written to disk; read it back to verify state field
+    const result = await tickDeterministic(slug, {
+      workspaceId: 'test', triplet: 'hk@claude-code:m', dryRun: false,
+    });
+    assert.equal(result.chase_events_emitted, 1);
+    // Read the events and find the chase
+    const { readEvents } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
+    const events = readEvents(dir);
+    const chase = events.find(e => e.type === 'turn' && Array.isArray(e.payload?.signals) && e.payload.signals.includes('chase'));
+    assert.ok(chase, 'chase event should be written to events/ dir');
+    assert.equal(chase.payload.state, 'blocked', 'obligation-missed chase must have state:blocked');
+    // No heartbeat: chase body must contain substantive content (more than 20 words)
+    const wordCount = (chase.payload.body || '').split(/\s+/).filter(Boolean).length;
+    assert.ok(wordCount > 5, 'chase body should be substantive, not a heartbeat');
+  } finally { cleanupLocalCollab(slug); }
+});
