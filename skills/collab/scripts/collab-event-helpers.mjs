@@ -113,8 +113,11 @@ export function generateEventId(tsIso, authorSlug) {
 // --- Triplet ---
 
 export function deriveTriplet(workspaceId) {
-  const r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
-  const machine = (r.stdout || '').trim() || 'unknown';
+  // `hostname -s` is unsupported on Windows; fall back to no-args form which
+  // works cross-platform and returns the short hostname on all three OSes.
+  let r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) r = spawnSync('hostname', [], { encoding: 'utf8' });
+  const machine = (r.stdout || '').trim().split('.')[0] || 'unknown';
   return `${workspaceId}@${detectHarness()}:${machine}`;
 }
 
@@ -473,8 +476,9 @@ export function readLocalPluginVersionInfo() {
   // Fallback: extract version from the script's own install cache path.
   // Handles the case where env vars are not injected (e.g., agent Bash tool calls).
   // Pattern: /.../plugins/cache/<scope>/<name>/<version>/...
+  // Normalize to forward slashes first so the regex works on Windows paths too.
   try {
-    const selfPath = fileURLToPath(import.meta.url);
+    const selfPath = fileURLToPath(import.meta.url).replace(/\\/g, '/');
     const match = selfPath.match(/\/plugins\/cache\/[^/]+\/[^/]+\/(\d+\.\d+\.\d+)\//);
     if (match) return { version: match[1], source: 'cache-path', confidence: 'medium' };
   } catch {
