@@ -52,21 +52,7 @@ After install, `${CLAUDE_PLUGIN_ROOT}` resolves to the installed plugin director
 
 ### Codex
 
-Codex install uses the standard marketplace flow — the repo root contains `.agents/plugins/marketplace.json` pointing to `./plugins/collab`, and `plugins/collab` is a self-contained plugin directory:
-
-```bash
-codex plugin marketplace add dbatesai/collab-plugin --ref main
-codex plugin add collab@collab
-```
-
-Or from a local clone:
-
-```bash
-codex plugin marketplace add /path/to/collab-plugin
-codex plugin add collab@collab
-```
-
-After install, `${CODEX_PLUGIN_ROOT}` resolves to the installed plugin directory.
+Codex install is **experimental** for collab-plugin in v0.1 — see your local Codex harness docs for the current command shape. The repo's `.codex-plugin/plugin.json` is at the repo root, so the install pattern is "add this Git source as a single plugin," not "add this as a marketplace and pick the collab plugin from inside it." If your Codex install treats the source as a marketplace root, you may see a marketplace named `collab` with a single plugin inside — that works; the path resolution is the same.
 
 After install, `${CODEX_PLUGIN_ROOT}` resolves to the installed plugin directory.
 

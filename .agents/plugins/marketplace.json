@@ -1,0 +1,20 @@
+{
+  "name": "collab",
+  "interface": {
+    "displayName": "CORE Collab"
+  },
+  "plugins": [
+    {
+      "name": "collab",
+      "source": {
+        "source": "local",
+        "path": "./plugins/collab"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

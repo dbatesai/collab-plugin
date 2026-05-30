@@ -51,6 +51,31 @@ jobs:
             for(const k of ["name","description"])
               if(!new RegExp("^"+k+":\\s*\\S","m").test(m[1])){console.error("missing: "+k);process.exit(1);}
             console.log("SKILL.md frontmatter OK");'
+      - name: Codex marketplace path integrity
+        run: |
+          node -e '
+            const fs=require("fs"),path=require("path");
+            const market=JSON.parse(fs.readFileSync(".agents/plugins/marketplace.json","utf8"));
+            const rootVersion=JSON.parse(fs.readFileSync(".codex-plugin/plugin.json","utf8")).version;
+            let failed=0;
+            for(const p of market.plugins||[]){
+              if(!p.source||p.source.source!=="local")continue;
+              const pluginDir=path.resolve(p.source.path);
+              if(!fs.existsSync(pluginDir)){console.error("dir missing: "+p.source.path);failed=1;continue;}
+              const pjPath=path.join(pluginDir,".codex-plugin","plugin.json");
+              if(!fs.existsSync(pjPath)){console.error("missing: "+pjPath);failed=1;continue;}
+              const pj=JSON.parse(fs.readFileSync(pjPath,"utf8"));
+              if(pj.name!==p.name){console.error("name mismatch: marketplace="+p.name+" vs pj="+pj.name);failed=1;}
+              if(pj.version!==rootVersion){console.error("version drift: root="+rootVersion+" plugin="+pj.version);failed=1;}
+              const skillsDir=path.join(pluginDir,"skills");
+              if(!fs.existsSync(skillsDir)){console.error("skills missing: "+skillsDir);failed=1;}
+              console.log("plugin "+p.name+" at "+p.source.path+": OK (v"+pj.version+")");
+            }
+            if(failed)process.exit(1);
+          '
+      - name: Validate marketplace.json
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('.agents/plugins/marketplace.json','utf8'));console.log('marketplace.json OK');"
       - name: BUILD file present
         run: |
           set -e
