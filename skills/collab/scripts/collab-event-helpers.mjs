@@ -446,6 +446,107 @@ export function nextEventId(events) {
   return 'evt-' + String(n).padStart(width, '0');
 }
 
+// --- Obligations: leases, chase, and executed timeout actions ---
+//
+// Chase alone is not escalation. A scanner that emits three chases and then goes quiet is a
+// silent stall: the ledger shows activity while nothing advances, and the only thing that
+// moves the goal is a human noticing. So an exhausted chase sequence hands off to the
+// DECLARED on_timeout action, and that action executes and leaves a record.
+
+export const OBLIGATION_GRACE_MS = 5 * 60 * 1000;
+export const CHASE_FLOOD_LIMIT = 3;
+export const NO_PROGRESS_WINDOW_MS = 10 * 60 * 1000;
+export const VALID_TIMEOUT_ACTIONS = ['proceed-alone', 'reassign', 'degrade-and-continue', 'close-degraded'];
+
+const ISO_RE_OBL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const isChase = (e) => e.type === 'turn' && (e.payload?.intent === 'chase' || (e.payload?.signals || []).includes('chase'));
+
+// Bookkeeping the system emits about itself. None of it advances the goal, so none of it
+// counts as progress.
+const isSubstantive = (e) => {
+  if (['chase', 'quarantined', 'reconciled', 'timeout-action'].includes(e.type)) return false;
+  if (isChase(e)) return false;
+  if (e.type === 'turn') return Boolean((e.payload?.body || '').trim());
+  return ['propose-close', 'ratify', 'object', 'close', 'join', 'kickoff'].includes(e.type);
+};
+
+/**
+ * What is owed right now. Pure: takes events, returns findings. The scanner decides, not
+ * in-the-moment judgment, because an agent deep in a long session will just keep waiting.
+ */
+export function evaluateObligations(events, { now, self }) {
+  const nowMs = typeof now === 'number' ? now : Date.parse(now);
+  const due = [], invalid = [];
+
+  const latestPerAuthor = new Map();
+  for (const e of events) {
+    if (e.type !== 'turn' || e.author === self) continue;
+    if (!e.payload?.next_update_by) continue;
+    latestPerAuthor.set(e.author, e);
+  }
+
+  for (const [participant, e] of latestPerAuthor) {
+    const dl = e.payload.next_update_by;
+    if (!ISO_RE_OBL.test(dl)) continue;             // non-ISO deadlines are unreliable; skip
+
+    // A wait with a deadline but no declared action is an unbounded wait.
+    if (!VALID_TIMEOUT_ACTIONS.includes(e.payload.on_timeout)) {
+      invalid.push({
+        event_id: e.event_id, participant,
+        reason: `waiting with a deadline but no valid on_timeout (got ${JSON.stringify(e.payload.on_timeout)}); ` +
+                `expected one of ${VALID_TIMEOUT_ACTIONS.join(', ')}`,
+      });
+      continue;
+    }
+    if (nowMs - Date.parse(dl) < OBLIGATION_GRACE_MS) continue;
+
+    // Already discharged? Do not re-fire policy forever.
+    const settled = events.some(x => x.type === 'timeout-action' && x.payload?.participant === participant
+      && Date.parse(x.payload?.for_deadline || 0) === Date.parse(dl));
+    if (settled) continue;
+
+    const chases = events.filter(x => isChase(x) && Date.parse(x.ts) > Date.parse(dl)).length;
+    due.push(chases < CHASE_FLOOD_LIMIT
+      ? { participant, action: 'chase', for_deadline: dl, chases_so_far: chases }
+      : { participant, action: e.payload.on_timeout, for_deadline: dl, chases_so_far: chases });
+  }
+
+  // Zero-progress escalation: a window containing only bookkeeping means the collaboration
+  // looks busy and is not moving.
+  let escalate = null;
+  const inWindow = events.filter(e => nowMs - Date.parse(e.ts) <= NO_PROGRESS_WINDOW_MS);
+  if (inWindow.length > 0 && !inWindow.some(isSubstantive)) {
+    escalate = {
+      reason: `no substantive progress in ${Math.round(NO_PROGRESS_WINDOW_MS / 60000)} minutes ` +
+              `(${inWindow.length} bookkeeping event(s), 0 substantive) — chases are not progress`,
+      window_events: inWindow.length,
+    };
+  }
+  return { due, invalid, escalate };
+}
+
+/** Execute a due timeout action and leave a routed record. Reporting it is not enough. */
+export function executeTimeoutAction(collabDir, item, author) {
+  if (!item || !VALID_TIMEOUT_ACTIONS.includes(item.action)) return null;
+  const ts = new Date().toISOString();
+  const ev = {
+    event_id: generateEventId(ts, authorSlugFromTriplet(author)),
+    ts, author, slug: readEvents(collabDir).find(e => e.type === 'kickoff')?.slug ?? '',
+    type: 'timeout-action', references: [],
+    payload: {
+      schema_version: '1.0',
+      provenance: { emit_mode: 'automated', harness: 'obligation-scanner' },
+      action: item.action, participant: item.participant, for_deadline: item.for_deadline,
+      chases_so_far: item.chases_so_far,
+      note: 'Declared on_timeout policy executed after the chase sequence was exhausted. '
+          + 'The wait is now closed by policy rather than left open indefinitely.',
+      signals: ['timeout-executed', item.action],
+    },
+  };
+  appendEvent(collabDir, ev);
+  return ev;
+}
+
 // --- Event queries ---
 
 export function getJoinedAgents(events) {
