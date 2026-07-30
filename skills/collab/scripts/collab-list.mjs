@@ -5,17 +5,17 @@
 import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT, collabsRootForTransport } from './transport.mjs';
+import { localCollabsRoot, githubReposRoot, collabsRootForTransport } from './transport.mjs';
 import { readEvents, isClosed, getJoinedAgents } from './collab-event-helpers.mjs';
 
 function discoverTransports(only) {
   if (only) return [only];
   const transports = [];
-  if (existsSync(LOCAL_COLLABS_ROOT)) transports.push('localhost');
-  if (existsSync(GITHUB_REPOS_ROOT)) {
-    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      if (existsSync(join(GITHUB_REPOS_ROOT, e.name, 'collabs'))) transports.push(`github:${e.name}`);
+  if (existsSync(localCollabsRoot())) transports.push('localhost');
+  const REPOS_ROOT = githubReposRoot();
+  if (existsSync(REPOS_ROOT)) {
+    for (const e of readdirSync(REPOS_ROOT, { withFileTypes: true })) {
+      if (existsSync(join(REPOS_ROOT, e.name, 'collabs'))) transports.push(`github:${e.name}`);
     }
   }
   return transports;

@@ -1,7 +1,10 @@
 name: CI
 on:
   push:
-    branches: [main]
+    # `next` is the integration branch. Without it here, CI first runs only when a PR is
+    # opened, so everything merged onto next — including the zero-todo gate below — sits
+    # unverified until then.
+    branches: [main, next]
   pull_request:
 permissions:
   contents: read
@@ -51,6 +54,31 @@ jobs:
             for(const k of ["name","description"])
               if(!new RegExp("^"+k+":\\s*\\S","m").test(m[1])){console.error("missing: "+k);process.exit(1);}
             console.log("SKILL.md frontmatter OK");'
+      - name: Codex marketplace path integrity
+        run: |
+          node -e '
+            const fs=require("fs"),path=require("path");
+            const market=JSON.parse(fs.readFileSync(".agents/plugins/marketplace.json","utf8"));
+            const rootVersion=JSON.parse(fs.readFileSync(".codex-plugin/plugin.json","utf8")).version;
+            let failed=0;
+            for(const p of market.plugins||[]){
+              if(!p.source||p.source.source!=="local")continue;
+              const pluginDir=path.resolve(p.source.path);
+              if(!fs.existsSync(pluginDir)){console.error("dir missing: "+p.source.path);failed=1;continue;}
+              const pjPath=path.join(pluginDir,".codex-plugin","plugin.json");
+              if(!fs.existsSync(pjPath)){console.error("missing: "+pjPath);failed=1;continue;}
+              const pj=JSON.parse(fs.readFileSync(pjPath,"utf8"));
+              if(pj.name!==p.name){console.error("name mismatch: marketplace="+p.name+" vs pj="+pj.name);failed=1;}
+              if(pj.version!==rootVersion){console.error("version drift: root="+rootVersion+" plugin="+pj.version);failed=1;}
+              const skillsDir=path.join(pluginDir,"skills");
+              if(!fs.existsSync(skillsDir)){console.error("skills missing: "+skillsDir);failed=1;}
+              console.log("plugin "+p.name+" at "+p.source.path+": OK (v"+pj.version+")");
+            }
+            if(failed)process.exit(1);
+          '
+      - name: Validate marketplace.json
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('.agents/plugins/marketplace.json','utf8'));console.log('marketplace.json OK');"
       - name: BUILD file present
         run: |
           set -e
@@ -72,4 +100,15 @@ jobs:
           GIT_ASKPASS: "true"
         # --test-timeout names any single hanging test; `timeout` caps the whole
         # step so a hang surfaces as a fast, diagnosable failure (not a 6h stall).
-        run: timeout 240 node --test --test-timeout=30000 tests/*.mjs 2>&1
+        run: |
+          set -o pipefail
+          timeout 240 node --test --test-timeout=30000 tests/*.mjs 2>&1 | tee /tmp/suite.log
+          # `node --test` exits 0 when tests are marked `todo`, so an exit-code check alone
+          # lets a KNOWN, recorded defect pass the gate silently. A todo is an open defect,
+          # not a pass: release stays blocked until the count is zero.
+          todo=$(grep -oE 'todo [0-9]+' /tmp/suite.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          if [ "${todo:-0}" -ne 0 ]; then
+            echo "GATE FAIL: ${todo} todo test(s) — a recorded open defect is not a passing build."
+            grep -nE '# TODO|todo' /tmp/suite.log | head -20
+            exit 1
+          fi

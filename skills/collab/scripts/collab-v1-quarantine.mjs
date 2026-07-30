@@ -13,6 +13,9 @@
 
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  appendEvent, readEvents, generateEventId, authorSlugFromTriplet,
+} from './collab-event-helpers.mjs';
 
 // v1 turn events require these payload fields (typed handoff contract).
 export const V1_REQUIRED_TURN_FIELDS = ['state', 'owner', 'waiting_on', 'next_update_by'];
@@ -98,8 +101,17 @@ export function quarantineEvent(collabDir, event, reason, opts = {}) {
  */
 export function quarantineInvalidV1Events(collabDir, opts = {}) {
   const eventsDir = join(collabDir, 'events');
-  const report = { quarantined: [], warnings: [] };
+  const report = { quarantined: [], warnings: [], notices: [] };
   if (!existsSync(eventsDir)) return report;
+
+  // Ids already announced, so a tick every cycle does not flood the ledger with notices.
+  const alreadyNoticed = new Set(
+    readEvents(collabDir)
+      .filter(e => e.type === 'quarantined')
+      .map(e => e.payload?.quarantined_event_id)
+      .filter(Boolean),
+  );
+
   for (const name of readdirSync(eventsDir)) {
     if (!name.endsWith('.json') || name.startsWith('.')) continue;
     let event;
@@ -110,9 +122,48 @@ export function quarantineInvalidV1Events(collabDir, opts = {}) {
     if (v.tier === 'v1') {
       quarantineEvent(collabDir, event, v.reason, opts);
       report.quarantined.push({ event_id: event.event_id, reason: v.reason });
+
+      // Preserving bytes is not sufficient: without a routed notice, the only path from
+      // "quarantined" to "anyone knows" runs through a peer inspecting the directory.
+      if (opts.author && !alreadyNoticed.has(event.event_id)) {
+        const notice = emitQuarantineNotice(collabDir, event, v.reason, opts);
+        alreadyNoticed.add(event.event_id);
+        report.notices.push({ event_id: notice.event_id, quarantined_event_id: event.event_id });
+      }
     } else {
       report.warnings.push({ event_id: event.event_id, reason: v.reason });
     }
   }
   return report;
+}
+
+/**
+ * Emit a routed `quarantined` event so a suppressed peer event is visible through a normal
+ * receive cycle rather than only by directory inspection. Carries provenance so the notice
+ * itself passes v1 validation and cannot be quarantined by the next scan.
+ */
+function emitQuarantineNotice(collabDir, event, reason, opts = {}) {
+  const now = opts.now || (() => new Date().toISOString());
+  const ts = now();
+  const author = opts.author;
+  const notice = {
+    event_id: generateEventId(ts, authorSlugFromTriplet(author)),
+    ts, author, slug: event.slug ?? '',
+    type: 'quarantined',
+    references: [event.event_id],
+    payload: {
+      schema_version: '1.0',
+      provenance: { emit_mode: 'automated', harness: 'quarantine-scan' },
+      quarantined_event_id: event.event_id,
+      quarantined_author: event.author,
+      quarantined_type: event.type,
+      reason,
+      artifact: `.quarantined-${event.event_id}.json`,
+      note: 'Event failed v1 validation and does not route. Content is preserved and readable '
+          + 'at the artifact path. It counts as nothing until its author posts a valid replacement.',
+      signals: ['quarantined', reason],
+    },
+  };
+  appendEvent(collabDir, notice);
+  return notice;
 }

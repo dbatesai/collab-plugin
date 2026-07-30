@@ -15,7 +15,7 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  findCollabAcrossTransports, readEvents, nextEventId, appendEvent,
+  findCollabAcrossTransports, readEvents, generateEventId, authorSlugFromTriplet, appendEvent,
   deriveTriplet, hasJoined, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
   getJoinedAgents,
@@ -75,11 +75,14 @@ export async function tickDeterministic(slug, options = {}) {
   // v1.0 #3: quarantine invalid v1 events before routing so chase/tick logic
   // never operates on malformed or non-ISO-timestamp events. readEvents then
   // skips the .quarantined- dotfiles, so the routing sees only valid events.
-  if (!dryRun) quarantineInvalidV1Events(dir);
+  // Resolve identity first: quarantine needs an author so it can emit a ROUTED notice.
+  // Without one it would preserve the bytes and announce nothing, leaving a suppressed
+  // peer event visible only to whoever inspects the directory by hand.
+  const triplet = givenTriplet || deriveTriplet(workspaceId);
+  if (!dryRun) quarantineInvalidV1Events(dir, { author: triplet });
   const events = readEvents(dir);
   const transport = transportFromEvents(events);
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
-  const triplet = givenTriplet || deriveTriplet(workspaceId);
 
   if (!hasJoined(events, triplet)) {
     // v0.2 version check: if kickoff specifies a min_collab_plugin_version, enforce it
@@ -105,7 +108,7 @@ export async function tickDeterministic(slug, options = {}) {
     const net = route.split(':')[1];
     const outcomes = { 'wall-clock':'aborted-budget', 'stall':'aborted-stall', 'objection-deadlock':'aborted-objection' };
     const ev = {
-      event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: 'close', references: [],
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, type: 'close', references: [],
       payload: { final_synthesis: `Safety net: ${net}`, outcome: outcomes[net] },
     };
     if (!dryRun) {
@@ -119,7 +122,7 @@ export async function tickDeterministic(slug, options = {}) {
   if (route === 'emit-close') {
     const rat = getRatificationStatus(events, nowTs);
     const ev = {
-      event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: 'close',
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, type: 'close',
       references: [rat.proposeClose.event_id],
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: 'converged' },
     };
@@ -165,7 +168,7 @@ export async function tickDeterministic(slug, options = {}) {
 
       const harness = detectHarness();
       const chaseEv = {
-        event_id: nextEventId([...events, ...chaseEvents]),
+        event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)),
         ts: nowTs, author: triplet, slug,
         type: 'turn', references: [last.event_id],
         payload: {

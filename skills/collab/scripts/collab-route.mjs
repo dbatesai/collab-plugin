@@ -16,7 +16,7 @@ import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir, isPinRef } from './collab-event-helpers.mjs';
-import { LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT } from './transport.mjs';
+import { localCollabsRoot, githubReposRoot } from './transport.mjs';
 
 const SLUG_PATTERNS = [
   /\bslug\s+([a-z0-9][a-z0-9-]{0,49})\b/i,
@@ -82,13 +82,46 @@ function resolvePinRef(ref, state) {
   return state.pinIndex?.get(ref) || ref;
 }
 
-export function detectAction(message, state, explicitTransport) {
-  const transport = explicitTransport || 'github:files';
-  const view = (state.byTransport && state.byTransport[transport])
-    || { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
+/**
+ * Which transport actually holds this slug? Slugs and PINs are globally unique across
+ * transports, and SKILL.md promises the prefix is optional on join/tick/status/abort.
+ * Scoping the lookup to one default transport made every localhost channel unresolvable
+ * by bare slug or PIN — it returned `fuzzy`, and the guidance then invites treating
+ * `fuzzy` as kickoff, which forks a duplicate channel.
+ */
+function transportsHoldingSlug(state, slug) {
+  const hits = [];
+  for (const [t, v] of Object.entries(state.byTransport || {})) {
+    if (v.existsActive.has(slug) || v.existsClosed.has(slug)) hits.push(t);
+  }
+  return hits;
+}
 
+export function detectAction(message, state, explicitTransport) {
   const rawSlug = extractSlug(message);
   const extractedSlug = resolvePinRef(rawSlug, state);
+
+  // An explicit prefix always wins. Otherwise find where the slug really lives, and fall
+  // back to the default only when the reference resolves nowhere (a genuine kickoff).
+  //
+  // Uniqueness is asserted at kickoff, but a violation must not be resolved by picking the
+  // first match: two agents with different iteration order would route to different physical
+  // channels while believing they share one. Refuse and make the caller disambiguate.
+  const holders = extractedSlug && !explicitTransport ? transportsHoldingSlug(state, extractedSlug) : [];
+  if (holders.length > 1) {
+    return {
+      // No chosen transport: returning holders[0] would leak the same arbitrary first pick
+      // to any caller that reads `transport`, so the refusal would look safe while still
+      // handing one over.
+      route: 'fuzzy', extractedSlug, transport: null, candidates: holders,
+      reason: `slug "${extractedSlug}" exists on ${holders.length} transports (${holders.join(', ')}); ` +
+              'route with an explicit transport prefix, or remove the duplicate',
+    };
+  }
+
+  const transport = explicitTransport || holders[0] || 'github:files';
+  const view = (state.byTransport && state.byTransport[transport])
+    || { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
 
   if (ABORT_RE.test(message) && extractedSlug) {
     if (view.existsActive.has(extractedSlug)) {
@@ -123,13 +156,14 @@ export function detectAction(message, state, explicitTransport) {
 export function buildStateFromDisk(triplet) {
   const state = { byTransport: {}, pinIndex: new Map() };
   const transportsToScan = [];
-  if (existsSync(LOCAL_COLLABS_ROOT)) {
-    transportsToScan.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
+  const LOCAL_ROOT = localCollabsRoot();
+  const REPOS_ROOT = githubReposRoot();
+  if (existsSync(LOCAL_ROOT)) {
+    transportsToScan.push({ transport: 'localhost', root: LOCAL_ROOT });
   }
-  if (existsSync(GITHUB_REPOS_ROOT)) {
-    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      const root = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
+  if (existsSync(REPOS_ROOT)) {
+    for (const e of readdirSync(REPOS_ROOT, { withFileTypes: true })) {
+      const root = join(REPOS_ROOT, e.name, 'collabs');
       if (existsSync(root)) transportsToScan.push({ transport: `github:${e.name}`, root });
     }
   }

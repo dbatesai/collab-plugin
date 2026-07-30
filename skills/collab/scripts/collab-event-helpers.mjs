@@ -7,9 +7,9 @@
  */
 import {
   readFileSync, writeFileSync,
-  existsSync, mkdirSync, readdirSync, renameSync,
+  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 // detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
 // Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
 import {
-  detectHarness, LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT,
+  detectHarness, localCollabsRoot, githubReposRoot,
   parseTransport, collabsRootForTransport,
 } from './transport.mjs';
 export { detectHarness };
@@ -88,33 +88,29 @@ export function deriveSlug(message) {
 
 // --- Event ID ---
 
-// Monotonic per-process counter — guarantees uniqueness for same-minute,
-// same-author IDs generated within one process (the rapid-call collision case).
-let _eidCounter = 0;
-
-// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<rand><counter>.
+// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<uuidv4>.
 // Lexicographic sort on event_id is NOT relied on for ordering — readEvents sorts
 // by `ts` then event_id (v1.0 invariant). The suffix exists only for uniqueness.
 //
-// Entropy (v1.0 fix, HC-flagged): the old randomBytes(2)=16 bits collided on rapid
-// same-minute calls (birthday paradox at ~100 IDs/minute). Now: 4 hex bytes of
-// randomness PLUS a base36 per-process counter, so two IDs from one process never
-// collide and cross-process collision needs a 32-bit clash in the same minute.
-// Format invariant preserved: evt-<minute-stamp>-<author>-<suffix>.
+// The author component is PERSISTED, so concurrent processes and restarts share it. The
+// random component therefore carries the whole collision burden and must be UUID-grade; a
+// short nonce plus a per-process counter does not, because each process restarts its
+// sequence at zero.
 export function generateEventId(tsIso, authorSlug) {
   const d = new Date(tsIso);
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
-  const rand = randomBytes(4).toString('hex');
-  const seq = (_eidCounter++ % 1296).toString(36).padStart(2, '0'); // 2 base36 chars
-  return `evt-${stamp}-${authorSlug}-${rand}${seq}`;
+  return `evt-${stamp}-${authorSlug}-${randomUUID()}`;
 }
 
 // --- Triplet ---
 
 export function deriveTriplet(workspaceId) {
-  const r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
-  const machine = (r.stdout || '').trim() || 'unknown';
+  // `hostname -s` is unsupported on Windows; fall back to no-args form which
+  // works cross-platform and returns the short hostname on all three OSes.
+  let r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
+  if (r.error || r.status !== 0) r = spawnSync('hostname', [], { encoding: 'utf8' });
+  const machine = (r.stdout || '').trim().split('.')[0] || 'unknown';
   return `${workspaceId}@${detectHarness()}:${machine}`;
 }
 
@@ -161,11 +157,12 @@ export function resolveCollabRef(ref) {
 //   - every github:<repo> discovered by listing GITHUB_REPOS_ROOT for a collabs/ subdirectory
 export function findCollabAcrossTransports(slug) {
   const roots = [];
-  if (existsSync(LOCAL_COLLABS_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
-  if (existsSync(GITHUB_REPOS_ROOT)) {
-    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      const candidate = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
+  const LOCAL_ROOT = localCollabsRoot();
+  const REPOS_ROOT = githubReposRoot();
+  if (existsSync(LOCAL_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_ROOT });
+  if (existsSync(REPOS_ROOT)) {
+    for (const e of readdirSync(REPOS_ROOT, { withFileTypes: true })) {
+      const candidate = join(REPOS_ROOT, e.name, 'collabs');
       if (existsSync(candidate)) roots.push({ transport: `github:${e.name}`, root: candidate });
     }
   }
@@ -259,12 +256,179 @@ export function appendEvent(collabDir, event) {
   if (!existsSync(eventsDir)) mkdirSync(eventsDir, { recursive: true });
   const finalPath = join(eventsDir, `${event.event_id}.json`);
   const tmpPath = join(eventsDir, `.tmp-${event.event_id}-${process.pid}-${Date.now()}-${randomBytes(2).toString('hex')}.json`);
-  writeFileSync(tmpPath, JSON.stringify(event, null, 2));
-  renameSync(tmpPath, finalPath);
+  const body = JSON.stringify(event, null, 2);
+  writeFileSync(tmpPath, body);
+
+  // Exclusive create. rename() is atomic but replaces an existing destination silently, so
+  // a same-id conflict would overwrite a committed event; link() fails EEXIST instead. The
+  // temp write stays because O_CREAT|O_EXCL alone leaves a window where a reader sees a
+  // partial file.
+  try {
+    linkSync(tmpPath, finalPath);
+    unlinkSync(tmpPath);            // link made a second name for the same inode
+    return { written: true, idempotent: false };
+  } catch (e) {
+    if (e.code !== 'EEXIST') { try { unlinkSync(tmpPath); } catch { /* best effort */ } throw e; }
+
+    // The id already exists. Identical bytes means this is a retry — the recovery ladder
+    // re-appends after a transport failure, and erroring there would break recovery.
+    let existing = null;
+    try { existing = readFileSync(finalPath, 'utf8'); } catch { /* unreadable; treat as conflict */ }
+    try { unlinkSync(tmpPath); } catch { /* best effort */ }
+
+    if (existing === body) return { written: false, idempotent: true };
+
+    const err = new Error(
+      `event id conflict: ${event.event_id} already exists in ${eventsDir} with different content. ` +
+      `The committed event was NOT replaced. Emit this event under a fresh id, and record the conflict.`,
+    );
+    err.code = 'EEVENTCONFLICT';
+    throw err;
+  }
 }
 
-// Regenerate events.jsonl from events/ dir (render artifact, not source of truth).
+// --- Foreign-surface detection and reconcile ---
+//
+// events.jsonl is a render, not an authority — but a legacy v0.1.x writer appends only
+// there, so its events exist nowhere else. Rendering rebuilds that file from events/, so
+// foreign events must be imported first or they are destroyed with no error.
+
+/**
+ * Split events.jsonl into events absent from canonical (`foreign`) and lines that cannot
+ * be parsed into an event at all (`malformed`).
+ */
+export function foreignSurfaceEvents(collabDir) {
+  const eventsDir = join(collabDir, 'events');
+  const jsonlPath = join(collabDir, 'events.jsonl');
+  if (!existsSync(eventsDir) || !existsSync(jsonlPath)) return { foreign: [], malformed: [] };
+
+  const canonical = new Set(
+    readdirSync(eventsDir)
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => f.slice(0, -'.json'.length)),
+  );
+
+  const foreign = [], malformed = [];
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    let e;
+    try { e = JSON.parse(line); }
+    catch (err) { malformed.push({ line: i + 1, reason: `unparseable JSON: ${err.message}` }); continue; }
+    if (!e || typeof e !== 'object' || !e.event_id || !e.ts) {
+      malformed.push({ line: i + 1, reason: 'missing event_id or ts' });
+      continue;
+    }
+    if (canonical.has(e.event_id)) continue;
+    foreign.push(e);
+  }
+  return { foreign, malformed };
+}
+
+/**
+ * Import foreign events into canonical. Returns { imported, escalated }.
+ *
+ * Runs without human input: recovery that stops to ask is just a slower stop. Import
+ * requires the event to be parseable, to belong to this channel, and to be non-conflicting.
+ * Anything else escalates, and a rejected event never halts the valid events beside it.
+ */
+export function reconcileForeignSurface(collabDir, author) {
+  const { foreign, malformed } = foreignSurfaceEvents(collabDir);
+  const imported = [], escalated = [];
+
+  for (const m of malformed) {
+    escalated.push({ event_id: null, line: m.line, reason: m.reason });
+  }
+  if (foreign.length === 0) return { imported, escalated };
+
+  // Channel identity comes from the canonical kickoff, never from the foreign event.
+  const canonicalEvents = readEvents(collabDir);
+  const slug = canonicalEvents.find(e => e.type === 'kickoff')?.slug
+    ?? canonicalEvents[0]?.slug ?? null;
+
+  // Authorized source: membership is a fact established by canonical kickoff/join events,
+  // never inferred from the event's own author field. Without this, anything able to append
+  // to events.jsonl can forge a turn under any identity and have it become canonical.
+  //
+  // This is AUTHORIZATION, not authentication. A writer with filesystem access can still
+  // spoof a joined triplet; what this establishes is that the claimed identity was a member
+  // of this channel at the event's position — not that the writer is who they say.
+  //
+  // Evaluated causally: "ever joined" would admit an event authored before its author
+  // joined, and one authored after they withdrew. Identity is compared exactly — a triplet
+  // differing by punctuation is a different identity, repaired by an explicit rejoin, never
+  // by normalizing the string.
+  const membership = canonicalEvents
+    .filter(e => e.type === 'kickoff' || e.type === 'join' || e.type === 'withdraw')
+    .map(e => ({ author: e.author, ts: e.ts, joins: e.type !== 'withdraw' }));
+
+  const authorizedAt = (author, ts) => {
+    let member = false;
+    for (const m of membership) {
+      if (m.author !== author || m.ts > ts) continue;
+      member = m.joins;                       // last transition at or before ts wins
+    }
+    return member;
+  };
+
+  for (const e of foreign) {
+    if (slug && e.slug !== slug) {
+      escalated.push({ event_id: e.event_id, reason: `channel mismatch: event slug "${e.slug}" != "${slug}"` });
+      continue;
+    }
+    if (!authorizedAt(e.author, e.ts)) {
+      escalated.push({
+        event_id: e.event_id,
+        reason: `unauthorized author at event position: "${e.author}" had no active canonical ` +
+                `kickoff/join at or before ${e.ts} (or had withdrawn). An identity that differs ` +
+                'even by punctuation is a different member; repair with an explicit rejoin.',
+      });
+      continue;
+    }
+    try {
+      appendEvent(collabDir, e);
+      imported.push(e.event_id);
+    } catch (err) {
+      escalated.push({
+        event_id: e.event_id,
+        reason: err.code === 'EEVENTCONFLICT' ? 'id already exists with different content' : err.message,
+      });
+    }
+  }
+
+  // The heal must be observable. A silent repair is indistinguishable from a bug.
+  if (imported.length > 0 && author) {
+    const ts = new Date().toISOString();
+    appendEvent(collabDir, {
+      event_id: generateEventId(ts, authorSlugFromTriplet(author)),
+      ts, author, slug: slug ?? '', type: 'reconciled', references: imported,
+      payload: {
+        imported, escalated,
+        source_surface: 'events.jsonl',
+        note: 'Imported events written by a legacy JSONL-only writer that canonical did not hold.',
+      },
+    });
+  }
+  return { imported, escalated };
+}
+
+// Regenerate events.jsonl from events/ (render artifact, not source of truth).
+//
+// Refuses when events.jsonl holds events canonical does not, since rendering would destroy
+// them. The guard is at the writer boundary so every caller inherits it; reconcile first.
 export function renderEventsJsonl(collabDir) {
+  const { foreign } = foreignSurfaceEvents(collabDir);
+  if (foreign.length > 0) {
+    const err = new Error(
+      `Refusing to render events.jsonl in ${collabDir}: ${foreign.length} unreconciled foreign ` +
+      `event(s) present that canonical does not hold (${foreign.map(e => e.event_id).join(', ')}). ` +
+      `Rendering would destroy them. Run reconcileForeignSurface() first.`,
+    );
+    err.code = 'EUNRECONCILEDFOREIGN';
+    err.foreignIds = foreign.map(e => e.event_id);
+    throw err;
+  }
   const events = readEvents(collabDir);
   const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
   writeFileSync(join(collabDir, 'events.jsonl'), content);
@@ -280,6 +444,107 @@ export function nextEventId(events) {
   const n = parseInt(last.replace('evt-', ''), 10) + 1;
   const width = Math.max(3, String(n).length);
   return 'evt-' + String(n).padStart(width, '0');
+}
+
+// --- Obligations: leases, chase, and executed timeout actions ---
+//
+// Chase alone is not escalation. A scanner that emits three chases and then goes quiet is a
+// silent stall: the ledger shows activity while nothing advances, and the only thing that
+// moves the goal is a human noticing. So an exhausted chase sequence hands off to the
+// DECLARED on_timeout action, and that action executes and leaves a record.
+
+export const OBLIGATION_GRACE_MS = 5 * 60 * 1000;
+export const CHASE_FLOOD_LIMIT = 3;
+export const NO_PROGRESS_WINDOW_MS = 10 * 60 * 1000;
+export const VALID_TIMEOUT_ACTIONS = ['proceed-alone', 'reassign', 'degrade-and-continue', 'close-degraded'];
+
+const ISO_RE_OBL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+const isChase = (e) => e.type === 'turn' && (e.payload?.intent === 'chase' || (e.payload?.signals || []).includes('chase'));
+
+// Bookkeeping the system emits about itself. None of it advances the goal, so none of it
+// counts as progress.
+const isSubstantive = (e) => {
+  if (['chase', 'quarantined', 'reconciled', 'timeout-action'].includes(e.type)) return false;
+  if (isChase(e)) return false;
+  if (e.type === 'turn') return Boolean((e.payload?.body || '').trim());
+  return ['propose-close', 'ratify', 'object', 'close', 'join', 'kickoff'].includes(e.type);
+};
+
+/**
+ * What is owed right now. Pure: takes events, returns findings. The scanner decides, not
+ * in-the-moment judgment, because an agent deep in a long session will just keep waiting.
+ */
+export function evaluateObligations(events, { now, self }) {
+  const nowMs = typeof now === 'number' ? now : Date.parse(now);
+  const due = [], invalid = [];
+
+  const latestPerAuthor = new Map();
+  for (const e of events) {
+    if (e.type !== 'turn' || e.author === self) continue;
+    if (!e.payload?.next_update_by) continue;
+    latestPerAuthor.set(e.author, e);
+  }
+
+  for (const [participant, e] of latestPerAuthor) {
+    const dl = e.payload.next_update_by;
+    if (!ISO_RE_OBL.test(dl)) continue;             // non-ISO deadlines are unreliable; skip
+
+    // A wait with a deadline but no declared action is an unbounded wait.
+    if (!VALID_TIMEOUT_ACTIONS.includes(e.payload.on_timeout)) {
+      invalid.push({
+        event_id: e.event_id, participant,
+        reason: `waiting with a deadline but no valid on_timeout (got ${JSON.stringify(e.payload.on_timeout)}); ` +
+                `expected one of ${VALID_TIMEOUT_ACTIONS.join(', ')}`,
+      });
+      continue;
+    }
+    if (nowMs - Date.parse(dl) < OBLIGATION_GRACE_MS) continue;
+
+    // Already discharged? Do not re-fire policy forever.
+    const settled = events.some(x => x.type === 'timeout-action' && x.payload?.participant === participant
+      && Date.parse(x.payload?.for_deadline || 0) === Date.parse(dl));
+    if (settled) continue;
+
+    const chases = events.filter(x => isChase(x) && Date.parse(x.ts) > Date.parse(dl)).length;
+    due.push(chases < CHASE_FLOOD_LIMIT
+      ? { participant, action: 'chase', for_deadline: dl, chases_so_far: chases }
+      : { participant, action: e.payload.on_timeout, for_deadline: dl, chases_so_far: chases });
+  }
+
+  // Zero-progress escalation: a window containing only bookkeeping means the collaboration
+  // looks busy and is not moving.
+  let escalate = null;
+  const inWindow = events.filter(e => nowMs - Date.parse(e.ts) <= NO_PROGRESS_WINDOW_MS);
+  if (inWindow.length > 0 && !inWindow.some(isSubstantive)) {
+    escalate = {
+      reason: `no substantive progress in ${Math.round(NO_PROGRESS_WINDOW_MS / 60000)} minutes ` +
+              `(${inWindow.length} bookkeeping event(s), 0 substantive) — chases are not progress`,
+      window_events: inWindow.length,
+    };
+  }
+  return { due, invalid, escalate };
+}
+
+/** Execute a due timeout action and leave a routed record. Reporting it is not enough. */
+export function executeTimeoutAction(collabDir, item, author) {
+  if (!item || !VALID_TIMEOUT_ACTIONS.includes(item.action)) return null;
+  const ts = new Date().toISOString();
+  const ev = {
+    event_id: generateEventId(ts, authorSlugFromTriplet(author)),
+    ts, author, slug: readEvents(collabDir).find(e => e.type === 'kickoff')?.slug ?? '',
+    type: 'timeout-action', references: [],
+    payload: {
+      schema_version: '1.0',
+      provenance: { emit_mode: 'automated', harness: 'obligation-scanner' },
+      action: item.action, participant: item.participant, for_deadline: item.for_deadline,
+      chases_so_far: item.chases_so_far,
+      note: 'Declared on_timeout policy executed after the chase sequence was exhausted. '
+          + 'The wait is now closed by policy rather than left open indefinitely.',
+      signals: ['timeout-executed', item.action],
+    },
+  };
+  appendEvent(collabDir, ev);
+  return ev;
 }
 
 // --- Event queries ---
@@ -473,8 +738,9 @@ export function readLocalPluginVersionInfo() {
   // Fallback: extract version from the script's own install cache path.
   // Handles the case where env vars are not injected (e.g., agent Bash tool calls).
   // Pattern: /.../plugins/cache/<scope>/<name>/<version>/...
+  // Normalize to forward slashes first so the regex works on Windows paths too.
   try {
-    const selfPath = fileURLToPath(import.meta.url);
+    const selfPath = fileURLToPath(import.meta.url).replace(/\\/g, '/');
     const match = selfPath.match(/\/plugins\/cache\/[^/]+\/[^/]+\/(\d+\.\d+\.\d+)\//);
     if (match) return { version: match[1], source: 'cache-path', confidence: 'medium' };
   } catch {
@@ -495,20 +761,123 @@ function repoForTransport(transport) {
   return dirname(collabsRootForTransport(transport));
 }
 
-export function gitPullRebase(transport) {
-  const repo = repoForTransport(transport);
-  const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
+// --- Repo operation claim ---
+//
+// Several agents can share one working copy, and git's own shared mutable state (notably
+// .git/FETCH_HEAD) is not safe against concurrent operations: a concurrent fetch leaves
+// multiple branch entries and `git pull --rebase` then refuses outright. Serializing repo
+// operations behind an exclusive claim removes the race; the lease means a crashed holder
+// cannot wedge the repo, and the generation means a resurrected holder cannot release
+// someone else's claim.
+export const REPO_CLAIM_TTL_MS = 60_000;
+const REPO_CLAIM_MAX_ATTEMPTS = 6;
+
+// A lease only prevents concurrency if the work it guards cannot outlive it. Unbounded
+// network git calls under a timed lease is a lease that expires mid-operation: a second
+// agent reclaims while the first is still mutating the repo. Worst-case guarded work must
+// stay strictly under REPO_CLAIM_TTL_MS — asserted by the WP4 attack tests.
+export const GIT_OP_TIMEOUT_MS = 6_000;
+// Worst case is gitCommitPush: add(1) + commit(1) + 3x(push, pull)(6) = 8. The third
+// iteration's pull still runs before the loop throws, so it counts.
+export const GIT_MAX_OPS_PER_CLAIM = 8;
+
+function repoClaimPath(repo) { return join(repo, '.git', 'collab-repo-claim.json'); }
+
+/** Take the claim, or return null if another live owner holds it. */
+export function acquireRepoClaim(repo, owner, now = Date.now()) {
+  const claimPath = repoClaimPath(repo);
+  let generation = 1;
+
+  if (existsSync(claimPath)) {
+    let held = null;
+    try { held = JSON.parse(readFileSync(claimPath, 'utf8')); } catch { /* corrupt → reclaimable */ }
+    const age = now - statSync(claimPath).mtimeMs;
+    if (age < REPO_CLAIM_TTL_MS) return null;      // live owner
+    generation = (held?.generation ?? 0) + 1;       // expired lease → reclaim
+    try { unlinkSync(claimPath); } catch { /* raced; the link below decides */ }
+  }
+
+  const claim = { owner, generation, acquired_at: new Date(now).toISOString(), pid: process.pid };
+  const tmp = join(repo, '.git', `.tmp-claim-${process.pid}-${now}.json`);
+  writeFileSync(tmp, JSON.stringify(claim, null, 2));
+  try {
+    linkSync(tmp, claimPath);                       // exclusive: EEXIST if another won
+    return claim;
+  } catch {
+    return null;
+  } finally {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+  }
 }
 
-export function gitCommitPush(collabDir, transport, commitMsg) {
-  const repo = repoForTransport(transport);
-  spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8' });
-  spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8' });
-  for (let i = 1; i <= 3; i++) {
-    const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8' });
-    if (push.status === 0) return;
-    spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+/** Release only if this claim is still the one on disk. */
+export function releaseRepoClaim(repo, claim) {
+  const claimPath = repoClaimPath(repo);
+  if (!claim || !existsSync(claimPath)) return false;
+  try {
+    const held = JSON.parse(readFileSync(claimPath, 'utf8'));
+    if (held.owner !== claim.owner || held.generation !== claim.generation) return false;
+  } catch { return false; }
+  try { unlinkSync(claimPath); return true; } catch { return false; }
+}
+
+/** Run fn while holding the claim. Retries with bounded jitter; always releases. */
+export function withRepoClaim(repo, owner, fn) {
+  let claim = null;
+  for (let i = 0; i < REPO_CLAIM_MAX_ATTEMPTS && !claim; i++) {
+    claim = acquireRepoClaim(repo, owner);
+    if (!claim) {
+      const backoff = 50 * (i + 1) + Math.floor(Math.random() * 100);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoff);
+    }
   }
-  throw new Error(`git push failed after 3 attempts in ${repo}`);
+  if (!claim) {
+    const err = new Error(
+      `repo claim unavailable in ${repo} after ${REPO_CLAIM_MAX_ATTEMPTS} attempts — another agent ` +
+      'is holding it. This is a degraded transport state, not an empty result.',
+    );
+    err.code = 'EREPOCLAIMBUSY';
+    throw err;
+  }
+  try { return fn(); }
+  finally { releaseRepoClaim(repo, claim); }
+}
+
+export function gitPullRebase(transport, owner = `pid-${process.pid}`) {
+  const repo = repoForTransport(transport);
+  // Throws rather than returning empty: a caller that swallows this reports a quiet
+  // channel, which is indistinguishable from no peer activity.
+  return withRepoClaim(repo, owner, () => { runGit(repo, ['pull', '--rebase']); });
+}
+
+// Every git call goes through here. An unchecked spawnSync discards status, signal and
+// timeout, so a failed add or commit followed by a push that exits 0 reports success while
+// the event was never committed.
+function runGit(repo, args, { allowFail = false } = {}) {
+  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
+  const ok = !r.error && r.status === 0;
+  if (!ok && !allowFail) {
+    const why = r.error ? (r.error.code === 'ETIMEDOUT' ? `timed out after ${GIT_OP_TIMEOUT_MS}ms` : r.error.message)
+                        : `exit ${r.status}: ${(r.stderr || '').trim()}`;
+    const err = new Error(`git ${args[0]} failed in ${repo}: ${why}`);
+    err.code = 'EGITOP';
+    throw err;
+  }
+  return { ok, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${process.pid}`) {
+  const repo = repoForTransport(transport);
+  // Serialized with pull: add/commit/push and the rebase inside the retry all mutate the
+  // same working copy and shared refs, so a concurrent agent mid-sequence is the race.
+  return withRepoClaim(repo, owner, () => {
+    runGit(repo, ['add', collabDir]);
+    runGit(repo, ['commit', '-m', commitMsg, '--allow-empty']);
+    for (let i = 1; i <= 3; i++) {
+      // Push may legitimately fail (peer landed first); the rebase that follows may not.
+      if (runGit(repo, ['push'], { allowFail: true }).ok) return;
+      runGit(repo, ['pull', '--rebase']);
+    }
+    throw new Error(`git push failed after 3 attempts in ${repo}`);
+  });
 }
