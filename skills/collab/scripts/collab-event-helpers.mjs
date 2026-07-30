@@ -347,9 +347,24 @@ export function reconcileForeignSurface(collabDir, author) {
   const slug = canonicalEvents.find(e => e.type === 'kickoff')?.slug
     ?? canonicalEvents[0]?.slug ?? null;
 
+  // Authorized source: membership is a fact established by canonical kickoff/join events,
+  // never inferred from the event's own author field. Without this, anything able to append
+  // to events.jsonl can forge a turn under any identity and have it become canonical,
+  // bypassing join entirely.
+  const authorized = new Set(
+    canonicalEvents.filter(e => e.type === 'kickoff' || e.type === 'join').map(e => e.author),
+  );
+
   for (const e of foreign) {
     if (slug && e.slug !== slug) {
       escalated.push({ event_id: e.event_id, reason: `channel mismatch: event slug "${e.slug}" != "${slug}"` });
+      continue;
+    }
+    if (!authorized.has(e.author)) {
+      escalated.push({
+        event_id: e.event_id,
+        reason: `unauthorized author: "${e.author}" has no canonical kickoff or join in this channel`,
+      });
       continue;
     }
     try {
@@ -637,6 +652,15 @@ function repoForTransport(transport) {
 export const REPO_CLAIM_TTL_MS = 60_000;
 const REPO_CLAIM_MAX_ATTEMPTS = 6;
 
+// A lease only prevents concurrency if the work it guards cannot outlive it. Unbounded
+// network git calls under a timed lease is a lease that expires mid-operation: a second
+// agent reclaims while the first is still mutating the repo. Worst-case guarded work must
+// stay strictly under REPO_CLAIM_TTL_MS — asserted by the WP4 attack tests.
+export const GIT_OP_TIMEOUT_MS = 6_000;
+// Worst case is gitCommitPush: add(1) + commit(1) + 3x(push, pull)(6) = 8. The third
+// iteration's pull still runs before the loop throws, so it counts.
+export const GIT_MAX_OPS_PER_CLAIM = 8;
+
 function repoClaimPath(repo) { return join(repo, '.git', 'collab-repo-claim.json'); }
 
 /** Take the claim, or return null if another live owner holds it. */
@@ -702,7 +726,7 @@ export function withRepoClaim(repo, owner, fn) {
 export function gitPullRebase(transport, owner = `pid-${process.pid}`) {
   const repo = repoForTransport(transport);
   return withRepoClaim(repo, owner, () => {
-    const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+    const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
     // Throws rather than returning empty: a caller that swallows this reports a quiet
     // channel, which is indistinguishable from no peer activity.
     if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
@@ -714,12 +738,12 @@ export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${pr
   // Serialized with pull: add/commit/push and the rebase inside the retry all mutate the
   // same working copy and shared refs, so a concurrent agent mid-sequence is the race.
   return withRepoClaim(repo, owner, () => {
-    spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8' });
-    spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8' });
+    spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
+    spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
     for (let i = 1; i <= 3; i++) {
-      const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8' });
+      const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
       if (push.status === 0) return;
-      spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+      spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
     }
     throw new Error(`git push failed after 3 attempts in ${repo}`);
   });

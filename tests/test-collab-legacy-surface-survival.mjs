@@ -40,13 +40,17 @@ function mkMixedChannel({ legacyEvents }) {
   mkdirSync(join(dir, 'events'), { recursive: true });
 
   const bJoin = { ...ev('evt-b-join', B, 'join'), type: 'join' };
+  // A joined the channel and then wrote through a legacy JSONL-only writer. Membership is
+  // what authorizes the import (§7 predicate 4); the legacy surface is just how it wrote.
+  const aJoin = { ...ev('evt-a-join', A, 'join'), type: 'join' };
   const b1 = ev('evt-b-0001', B, 'modern-1');
   appendEvent(dir, bJoin);
+  appendEvent(dir, aJoin);
   appendEvent(dir, b1);
 
   // A's legacy writer appends to events.jsonl: it rewrites the whole file from what it
   // can see, then adds its own line. Its own event exists ONLY here.
-  const lines = [bJoin, b1, ...legacyEvents].map(e => JSON.stringify(e));
+  const lines = [bJoin, aJoin, b1, ...legacyEvents].map(e => JSON.stringify(e));
   writeFileSync(join(dir, 'events.jsonl'), lines.join('\n') + '\n');
   return dir;
 }

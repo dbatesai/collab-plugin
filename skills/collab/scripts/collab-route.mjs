@@ -89,11 +89,12 @@ function resolvePinRef(ref, state) {
  * by bare slug or PIN — it returned `fuzzy`, and the guidance then invites treating
  * `fuzzy` as kickoff, which forks a duplicate channel.
  */
-function transportHoldingSlug(state, slug) {
+function transportsHoldingSlug(state, slug) {
+  const hits = [];
   for (const [t, v] of Object.entries(state.byTransport || {})) {
-    if (v.existsActive.has(slug) || v.existsClosed.has(slug)) return t;
+    if (v.existsActive.has(slug) || v.existsClosed.has(slug)) hits.push(t);
   }
-  return null;
+  return hits;
 }
 
 export function detectAction(message, state, explicitTransport) {
@@ -102,9 +103,20 @@ export function detectAction(message, state, explicitTransport) {
 
   // An explicit prefix always wins. Otherwise find where the slug really lives, and fall
   // back to the default only when the reference resolves nowhere (a genuine kickoff).
-  const transport = explicitTransport
-    || (extractedSlug && transportHoldingSlug(state, extractedSlug))
-    || 'github:files';
+  //
+  // Uniqueness is asserted at kickoff, but a violation must not be resolved by picking the
+  // first match: two agents with different iteration order would route to different physical
+  // channels while believing they share one. Refuse and make the caller disambiguate.
+  const holders = extractedSlug && !explicitTransport ? transportsHoldingSlug(state, extractedSlug) : [];
+  if (holders.length > 1) {
+    return {
+      route: 'fuzzy', extractedSlug, transport: holders[0], candidates: holders,
+      reason: `slug "${extractedSlug}" exists on ${holders.length} transports (${holders.join(', ')}); ` +
+              'route with an explicit transport prefix, or remove the duplicate',
+    };
+  }
+
+  const transport = explicitTransport || holders[0] || 'github:files';
   const view = (state.byTransport && state.byTransport[transport])
     || { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
 
