@@ -75,11 +75,14 @@ export async function tickDeterministic(slug, options = {}) {
   // v1.0 #3: quarantine invalid v1 events before routing so chase/tick logic
   // never operates on malformed or non-ISO-timestamp events. readEvents then
   // skips the .quarantined- dotfiles, so the routing sees only valid events.
-  if (!dryRun) quarantineInvalidV1Events(dir);
+  // Resolve identity first: quarantine needs an author so it can emit a ROUTED notice.
+  // Without one it would preserve the bytes and announce nothing, leaving a suppressed
+  // peer event visible only to whoever inspects the directory by hand.
+  const triplet = givenTriplet || deriveTriplet(workspaceId);
+  if (!dryRun) quarantineInvalidV1Events(dir, { author: triplet });
   const events = readEvents(dir);
   const transport = transportFromEvents(events);
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
-  const triplet = givenTriplet || deriveTriplet(workspaceId);
 
   if (!hasJoined(events, triplet)) {
     // v0.2 version check: if kickoff specifies a min_collab_plugin_version, enforce it
