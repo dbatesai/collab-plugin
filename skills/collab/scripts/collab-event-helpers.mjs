@@ -9,7 +9,7 @@ import {
   readFileSync, writeFileSync,
   existsSync, mkdirSync, readdirSync, renameSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -88,26 +88,22 @@ export function deriveSlug(message) {
 
 // --- Event ID ---
 
-// Monotonic per-process counter — guarantees uniqueness for same-minute,
-// same-author IDs generated within one process (the rapid-call collision case).
-let _eidCounter = 0;
-
-// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<rand><counter>.
+// Sortable unique event ID: evt-<YYYYMMDDHHmm>-<author-slug>-<uuidv4>.
 // Lexicographic sort on event_id is NOT relied on for ordering — readEvents sorts
 // by `ts` then event_id (v1.0 invariant). The suffix exists only for uniqueness.
 //
-// Entropy (v1.0 fix, HC-flagged): the old randomBytes(2)=16 bits collided on rapid
-// same-minute calls (birthday paradox at ~100 IDs/minute). Now: 4 hex bytes of
-// randomness PLUS a base36 per-process counter, so two IDs from one process never
-// collide and cross-process collision needs a 32-bit clash in the same minute.
-// Format invariant preserved: evt-<minute-stamp>-<author>-<suffix>.
+// Entropy: the author component is PERSISTED (it derives from the workspace/participant
+// identity), so two concurrent processes — or one process after a restart — reuse it. A
+// short random field then carries the whole collision burden, and a per-process counter
+// adds nothing across processes because each starts its own sequence at zero. That was the
+// prior scheme: 4 random bytes plus a base36 counter. randomUUID() is stdlib, is less code
+// than what it replaces, and moves the collision bound somewhere it stops being a design
+// risk. Format invariant preserved: evt-<minute-stamp>-<author>-<suffix>.
 export function generateEventId(tsIso, authorSlug) {
   const d = new Date(tsIso);
   const pad = (n, w = 2) => String(n).padStart(w, '0');
   const stamp = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}`;
-  const rand = randomBytes(4).toString('hex');
-  const seq = (_eidCounter++ % 1296).toString(36).padStart(2, '0'); // 2 base36 chars
-  return `evt-${stamp}-${authorSlug}-${rand}${seq}`;
+  return `evt-${stamp}-${authorSlug}-${randomUUID()}`;
 }
 
 // --- Triplet ---

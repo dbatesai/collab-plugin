@@ -15,7 +15,7 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  findCollabAcrossTransports, readEvents, nextEventId, appendEvent,
+  findCollabAcrossTransports, readEvents, generateEventId, authorSlugFromTriplet, appendEvent,
   deriveTriplet, hasJoined, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
   getJoinedAgents,
@@ -105,7 +105,7 @@ export async function tickDeterministic(slug, options = {}) {
     const net = route.split(':')[1];
     const outcomes = { 'wall-clock':'aborted-budget', 'stall':'aborted-stall', 'objection-deadlock':'aborted-objection' };
     const ev = {
-      event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: 'close', references: [],
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, type: 'close', references: [],
       payload: { final_synthesis: `Safety net: ${net}`, outcome: outcomes[net] },
     };
     if (!dryRun) {
@@ -119,7 +119,7 @@ export async function tickDeterministic(slug, options = {}) {
   if (route === 'emit-close') {
     const rat = getRatificationStatus(events, nowTs);
     const ev = {
-      event_id: nextEventId(events), ts: nowTs, author: triplet, slug, type: 'close',
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, type: 'close',
       references: [rat.proposeClose.event_id],
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: 'converged' },
     };
@@ -165,7 +165,7 @@ export async function tickDeterministic(slug, options = {}) {
 
       const harness = detectHarness();
       const chaseEv = {
-        event_id: nextEventId([...events, ...chaseEvents]),
+        event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)),
         ts: nowTs, author: triplet, slug,
         type: 'turn', references: [last.event_id],
         payload: {

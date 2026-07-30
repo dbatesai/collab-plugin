@@ -17,16 +17,22 @@ function mkCollabDir() {
 
 test('generateEventId produces minute-precision YYYYMMDDHHmm-<author>-<suffix> format', () => {
   const id = generateEventId('2026-05-25T09:22:00Z', 'core-gemini');
-  // v1.0 entropy fix: suffix is 8 hex (randomBytes(4)) + 2 base36 (per-process
-  // counter) for collision resistance. Minute-precision stamp + author preserved.
-  assert.match(id, /^evt-202605250922-core-gemini-[0-9a-f]{8}[0-9a-z]{2}$/);
+  // Suffix is a UUIDv4. The prior 8-hex + 2-base36 scheme put the whole collision burden
+  // on 32 bits, while the author component is persisted and therefore shared across
+  // concurrent processes and restarts — and the per-process counter reset to zero in each
+  // one, so it protected nothing there. Entropy is covered in depth by
+  // tests/test-collab-event-id-entropy.mjs. Minute stamp + author component preserved.
+  assert.match(
+    id,
+    /^evt-202605250922-core-gemini-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  );
 });
 
 test('generateEventId is unique across rapid calls (was probabilistic-collision flake)', () => {
   const ts = '2026-05-25T09:22:00Z';
   const ids = new Set();
-  // 1000 (not 100) to make any residual collision surface; per-process counter
-  // guarantees uniqueness for same-minute same-author within one process.
+  // 1000 (not 100) to make any residual collision surface for same-minute, same-author
+  // ids generated within one process.
   for (let i = 0; i < 1000; i++) ids.add(generateEventId(ts, 'core-hk'));
   assert.equal(ids.size, 1000);
 });
