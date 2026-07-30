@@ -6,7 +6,11 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { findCollabDir, readEvents } from './collab-event-helpers.mjs';
 
-const VALID_TYPES = ['kickoff','join','decline','turn','propose-close','ratify','object','withdraw','close'];
+// Participant-authored types, then the three the system writes for itself:
+// `reconciled` on a healed foreign surface, `quarantined` on a rejected v1 event,
+// `timeout-action` when a declared timeout policy executes.
+const VALID_TYPES = ['kickoff','join','decline','turn','propose-close','ratify','object','withdraw','close',
+                     'reconciled','quarantined','timeout-action'];
 const VALID_INTENTS = ['propose','critique','probe','synthesize','clarify'];
 const VALID_OUTCOMES = ['converged','aborted-stall','aborted-budget','aborted-objection','aborted-david'];
 const TRANSPORT_RE = /^(localhost|github:[a-z0-9_-]+)$/;
