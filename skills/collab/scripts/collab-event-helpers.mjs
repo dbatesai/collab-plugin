@@ -7,7 +7,7 @@
  */
 import {
   readFileSync, writeFileSync,
-  existsSync, mkdirSync, readdirSync, renameSync,
+  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
@@ -259,8 +259,38 @@ export function appendEvent(collabDir, event) {
   if (!existsSync(eventsDir)) mkdirSync(eventsDir, { recursive: true });
   const finalPath = join(eventsDir, `${event.event_id}.json`);
   const tmpPath = join(eventsDir, `.tmp-${event.event_id}-${process.pid}-${Date.now()}-${randomBytes(2).toString('hex')}.json`);
-  writeFileSync(tmpPath, JSON.stringify(event, null, 2));
-  renameSync(tmpPath, finalPath);
+  const body = JSON.stringify(event, null, 2);
+  writeFileSync(tmpPath, body);
+
+  // Create the final name exclusively. `rename()` is atomic but NOT exclusive — POSIX
+  // rename silently REPLACES an existing destination, which would turn a same-id conflict
+  // into a silent overwrite and lose a peer's event with no error anywhere. `link()` fails
+  // EEXIST instead, so the already-committed event always wins and the second writer is
+  // told. Writing the temp first is still required: a bare O_CREAT|O_EXCL open would leave
+  // a window where a reader could see a partially-written file.
+  try {
+    linkSync(tmpPath, finalPath);
+    unlinkSync(tmpPath);            // link made a second name for the same inode
+    return { written: true, idempotent: false };
+  } catch (e) {
+    if (e.code !== 'EEXIST') { try { unlinkSync(tmpPath); } catch { /* best effort */ } throw e; }
+
+    // The id already exists. Identical bytes means this is a retry — the recovery ladder
+    // re-appends after a transport failure, and erroring there would break recovery.
+    let existing = null;
+    try { existing = readFileSync(finalPath, 'utf8'); } catch { /* unreadable; treat as conflict */ }
+    try { unlinkSync(tmpPath); } catch { /* best effort */ }
+
+    if (existing === body) return { written: false, idempotent: true };
+
+    const err = new Error(
+      `event id conflict: ${event.event_id} already exists in ${eventsDir} with different content. ` +
+      `The committed event was NOT replaced. Emit this event under a fresh id, and record the conflict.`,
+    );
+    err.code = 'EEVENTCONFLICT';
+    err.eventId = event.event_id;
+    throw err;
+  }
 }
 
 // Regenerate events.jsonl from events/ dir (render artifact, not source of truth).
