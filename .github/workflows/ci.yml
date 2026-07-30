@@ -97,4 +97,15 @@ jobs:
           GIT_ASKPASS: "true"
         # --test-timeout names any single hanging test; `timeout` caps the whole
         # step so a hang surfaces as a fast, diagnosable failure (not a 6h stall).
-        run: timeout 240 node --test --test-timeout=30000 tests/*.mjs 2>&1
+        run: |
+          set -o pipefail
+          timeout 240 node --test --test-timeout=30000 tests/*.mjs 2>&1 | tee /tmp/suite.log
+          # `node --test` exits 0 when tests are marked `todo`, so an exit-code check alone
+          # lets a KNOWN, recorded defect pass the gate silently. A todo is an open defect,
+          # not a pass: release stays blocked until the count is zero.
+          todo=$(grep -oE 'todo [0-9]+' /tmp/suite.log | tail -1 | grep -oE '[0-9]+' || echo 0)
+          if [ "${todo:-0}" -ne 0 ]; then
+            echo "GATE FAIL: ${todo} todo test(s) — a recorded open defect is not a passing build."
+            grep -nE '# TODO|todo' /tmp/suite.log | head -20
+            exit 1
+          fi
