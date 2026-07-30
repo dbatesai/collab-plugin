@@ -30,7 +30,7 @@ The route script extracts a leading transport token (`localhost` or `github:<rep
 - `route: "tick"` — message references a known active slug; agent is joined
 - `route: "status"` — message asks about a known slug
 - `route: "abort"` — message says abort/cancel + names a known active slug
-- `route: "fuzzy"` — message references a slug-shaped string that doesn't match. Ask the user for disambiguation, or treat as kickoff if appropriate.
+- `route: "fuzzy"` — message references a slug-shaped string that doesn't match. Ask the user for disambiguation. **Never** convert an unresolved explicit slug or PIN into a kickoff: that silently forks a second parallel channel and both sides then wait forever for peers who are in the other one.
 
 **PINs (David's manual-entry shorthand).** A kickoff event stores a 6-digit `pin` in its payload so David can refer to a collab by `/collab 654321` instead of typing the full slug. The route script resolves a bare 6-digit number to the corresponding full slug before action detection. **Agents always communicate by slug** — in event payloads, in messages to peers, in status reports. The PIN exists solely so David can start an agent on a topic with minimal typing; the slug is the canonical identifier from that point on.
 
@@ -108,13 +108,13 @@ If yes — emit a join event by running:
 
 ```bash
 node --input-type=module -e "
-import {findCollabDir, readEvents, nextEventId, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
+import {findCollabDir, readEvents, generateEventId, authorSlugFromTriplet, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
 import {render} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
-gitPullRebase();
+gitPullRebase('<transport>');   // e.g. 'github:files' — required; omitting it throws
 const dir = findCollabDir('<slug>');
 const events = readEvents(dir);
 const triplet = deriveTriplet('<workspace_id>');
-const ev = { event_id: nextEventId(events), ts: new Date().toISOString(), author: triplet, slug: '<slug>',
+const ev = { event_id: generateEventId(new Date().toISOString(), authorSlugFromTriplet(triplet)), ts: new Date().toISOString(), author: triplet, slug: '<slug>',
   type: 'join', references: ['evt-001'],
   payload: { capability_match: ['<your-matched-tags>'], commitment: '<one-line-commitment>' } };
 appendEvent(dir, ev);
@@ -207,13 +207,13 @@ Emit a close event with `outcome: 'aborted-david'`:
 
 ```bash
 node --input-type=module -e "
-import {findCollabDir, readEvents, nextEventId, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
+import {findCollabDir, readEvents, generateEventId, authorSlugFromTriplet, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
 import {render} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
-gitPullRebase();
+gitPullRebase('<transport>');   // e.g. 'github:files' — required; omitting it throws
 const dir = findCollabDir('<slug>');
 const events = readEvents(dir);
 const triplet = deriveTriplet('<workspace_id>');
-const ev = { event_id: nextEventId(events), ts: new Date().toISOString(), author: triplet, slug: '<slug>',
+const ev = { event_id: generateEventId(new Date().toISOString(), authorSlugFromTriplet(triplet)), ts: new Date().toISOString(), author: triplet, slug: '<slug>',
   type: 'close', references: [], payload: { final_synthesis: 'David requested abort', outcome: 'aborted-david' } };
 appendEvent(dir, ev);
 await render('<slug>', { collabDir: dir, author: triplet });
@@ -226,8 +226,14 @@ Cancel `/loop` after the abort event lands. Other agents will see `close` on the
 
 The message named a slug-shaped string that doesn't match any known collab. Either:
 - Ask the user to clarify which slug they mean
-- Or, if the message describes new work, treat as kickoff
 - Or, if obviously a typo or stale reference, surface the issue and propose options
+- Only when the message carries **no explicit reference** at all and describes new work, treat as kickoff
+
+**An unresolved explicit slug or PIN is terminal for routing — never a kickoff.** Converting
+one into a new channel forks the collaboration silently: two channels, each waiting for
+peers who joined the other. Report the failure with candidate matches and a repair action
+instead. (This is why a symlinked transport root was so damaging — it made every channel in
+that repo unresolvable, and the documented recovery was to create a new one.)
 
 Don't guess silently.
 
