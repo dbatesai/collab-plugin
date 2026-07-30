@@ -167,7 +167,6 @@ export function findCollabAcrossTransports(slug) {
   if (existsSync(LOCAL_COLLABS_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
   if (existsSync(GITHUB_REPOS_ROOT)) {
     for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
       const candidate = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
       if (existsSync(candidate)) roots.push({ transport: `github:${e.name}`, root: candidate });
     }

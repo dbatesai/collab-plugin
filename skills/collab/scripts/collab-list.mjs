@@ -14,7 +14,6 @@ function discoverTransports(only) {
   if (existsSync(LOCAL_COLLABS_ROOT)) transports.push('localhost');
   if (existsSync(GITHUB_REPOS_ROOT)) {
     for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
       if (existsSync(join(GITHUB_REPOS_ROOT, e.name, 'collabs'))) transports.push(`github:${e.name}`);
     }
   }

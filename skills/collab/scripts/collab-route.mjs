@@ -128,7 +128,6 @@ export function buildStateFromDisk(triplet) {
   }
   if (existsSync(GITHUB_REPOS_ROOT)) {
     for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
       const root = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
       if (existsSync(root)) transportsToScan.push({ transport: `github:${e.name}`, root });
     }

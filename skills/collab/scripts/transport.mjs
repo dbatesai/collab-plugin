@@ -11,8 +11,10 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync, accessSync, constants
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
 
-export const LOCAL_COLLABS_ROOT = resolve(homedir(), '.collab/local');
-export const GITHUB_REPOS_ROOT  = resolve(homedir(), 'Documents/Projects');
+// Roots are env-overridable so tests can point the resolver at a temp fixture.
+// Without the override the values are unchanged, so production behavior is identical.
+export const LOCAL_COLLABS_ROOT = resolve(process.env.COLLAB_LOCAL_ROOT || join(homedir(), '.collab/local'));
+export const GITHUB_REPOS_ROOT  = resolve(process.env.COLLAB_REPOS_ROOT || join(homedir(), 'Documents/Projects'));
 
 const TRANSPORT_RE = /^(localhost|github:[a-z0-9_-]+)$/;
 const GITHUB_REPO_RE = /^github:([a-z0-9_-]+)$/;
