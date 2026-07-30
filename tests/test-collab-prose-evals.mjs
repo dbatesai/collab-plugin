@@ -209,39 +209,43 @@ test('no-heartbeat rule states its own test, not just the prohibition', () => {
  * binding it. A peer read that ratified list, used `closing`, and its events became
  * quarantine-eligible.
  *
- * Marked `todo` because D10 is a known-open defect awaiting a ratified amendment (separate
- * the fields vs widen the enum). Recording it as todo keeps CI honest: the gap is visible
- * and counted, and it is not silently absent from the suite.
+ * D10 amendment ratified 3/3 on 2026-07-30 (Hale proposed, Keel accepted, Agy accepted):
+ * the goal lifecycle vocabulary now binds to `goal_state` in the shared spec, `payload.state`
+ * keeps its four participant values, and `goal_state` is not required on ordinary turns.
+ * This test is therefore no longer `todo` — it must pass.
  *
  * Cross-repo by necessity — the shared spec lives in CORE. Skips cleanly when absent rather
  * than failing on a machine that only has collab-plugin.
  */
-test('D10: overlapping state vocabularies across documents must each name a distinct field',
-  { todo: 'D10 open — awaiting ratified amendment on separating participant state from goal lifecycle state' },
-  () => {
-    const SHARED_SPEC = join(HERE, '..', '..', 'CORE', 'dev', 'team-goal', 'team_goal_shared_spec.md');
-    let spec;
-    try { spec = readFileSync(SHARED_SPEC, 'utf8'); }
-    catch { return; }   // shared spec not present on this machine; nothing to compare
+test('D10: overlapping state vocabularies across documents must each name a distinct field', () => {
+  const SHARED_SPEC = join(HERE, '..', '..', 'CORE', 'dev', 'team-goal', 'team_goal_shared_spec.md');
+  let spec;
+  try { spec = readFileSync(SHARED_SPEC, 'utf8'); }
+  catch { return; }   // shared spec not present on this machine; nothing to compare
 
-    const m = spec.match(/Valid states:\s*(.+)/);
-    if (!m) return;
-    const specStates = [...m[1].matchAll(/`([a-z-]+)`/g)].map(x => x[1]);
-    if (specStates.length === 0) return;
+  const m = spec.match(/Valid values:\s*(.+)/) || spec.match(/Valid states:\s*(.+)/);
+  assert.ok(m, 'shared spec no longer declares a state vocabulary in a recognizable form');
+  const specStates = [...m[1].matchAll(/`([a-z-]+)`/g)].map(x => x[1]);
+  assert.ok(specStates.length > 0, 'extracted zero state values — a vacuous pass');
 
-    const overlap = specStates.filter(s => V1_VALID_STATES.includes(s));
-    const specOnly = specStates.filter(s => !V1_VALID_STATES.includes(s));
+  const overlap = specStates.filter(s => V1_VALID_STATES.includes(s));
+  const specOnly = specStates.filter(s => !V1_VALID_STATES.includes(s));
 
-    // Overlapping-but-unequal vocabularies are the trap: shared values make a value from the
-    // wrong list look correct. That is only safe if each list names the field it governs.
-    if (overlap.length > 0 && specOnly.length > 0) {
-      const specNamesField = /`?goal_state`?|state of the goal|goal lifecycle state/i.test(spec);
-      assert.ok(
-        specNamesField,
-        `two state vocabularies overlap on [${overlap.join(', ')}] while the shared spec also ` +
-        `defines [${specOnly.join(', ')}] that the validator REJECTS, and the spec never binds its ` +
-        'list to a distinct field name. A peer reading the ratified list will emit an ' +
-        'unroutable value that looks valid.',
-      );
-    }
-  });
+  // Overlapping-but-unequal vocabularies are the trap: shared values make a value from the
+  // wrong list look correct. That is only safe if each list names the field it governs.
+  if (overlap.length > 0 && specOnly.length > 0) {
+    const specNamesField = /`?goal_state`?/.test(spec);
+    assert.ok(
+      specNamesField,
+      `two state vocabularies overlap on [${overlap.join(', ')}] while the shared spec also ` +
+      `defines [${specOnly.join(', ')}] that the validator REJECTS, and the spec never binds its ` +
+      'list to a distinct field name. A peer reading the ratified list will emit an ' +
+      'unroutable value that looks valid.',
+    );
+    // And the distinction must be stated, not merely implied by a field name appearing once.
+    assert.ok(
+      /is NOT `?state`?|different field/i.test(spec),
+      'the spec names goal_state but never says it is distinct from the participant state field',
+    );
+  }
+});
