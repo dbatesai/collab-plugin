@@ -1,7 +1,10 @@
 name: CI
 on:
   push:
-    branches: [main]
+    # `next` is the integration branch. Without it here, CI first runs only when a PR is
+    # opened, so everything merged onto next — including the zero-todo gate below — sits
+    # unverified until then.
+    branches: [main, next]
   pull_request:
 permissions:
   contents: read
