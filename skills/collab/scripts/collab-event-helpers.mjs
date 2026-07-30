@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 // detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
 // Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
 import {
-  detectHarness, LOCAL_COLLABS_ROOT, GITHUB_REPOS_ROOT,
+  detectHarness, localCollabsRoot, githubReposRoot,
   parseTransport, collabsRootForTransport,
 } from './transport.mjs';
 export { detectHarness };
@@ -164,10 +164,12 @@ export function resolveCollabRef(ref) {
 //   - every github:<repo> discovered by listing GITHUB_REPOS_ROOT for a collabs/ subdirectory
 export function findCollabAcrossTransports(slug) {
   const roots = [];
-  if (existsSync(LOCAL_COLLABS_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_COLLABS_ROOT });
-  if (existsSync(GITHUB_REPOS_ROOT)) {
-    for (const e of readdirSync(GITHUB_REPOS_ROOT, { withFileTypes: true })) {
-      const candidate = join(GITHUB_REPOS_ROOT, e.name, 'collabs');
+  const LOCAL_ROOT = localCollabsRoot();
+  const REPOS_ROOT = githubReposRoot();
+  if (existsSync(LOCAL_ROOT)) roots.push({ transport: 'localhost', root: LOCAL_ROOT });
+  if (existsSync(REPOS_ROOT)) {
+    for (const e of readdirSync(REPOS_ROOT, { withFileTypes: true })) {
+      const candidate = join(REPOS_ROOT, e.name, 'collabs');
       if (existsSync(candidate)) roots.push({ transport: `github:${e.name}`, root: candidate });
     }
   }

@@ -13,8 +13,20 @@ import { homedir } from 'node:os';
 
 // Roots are env-overridable so tests can point the resolver at a temp fixture.
 // Without the override the values are unchanged, so production behavior is identical.
-export const LOCAL_COLLABS_ROOT = resolve(process.env.COLLAB_LOCAL_ROOT || join(homedir(), '.collab/local'));
-export const GITHUB_REPOS_ROOT  = resolve(process.env.COLLAB_REPOS_ROOT || join(homedir(), 'Documents/Projects'));
+//
+// Read these through the accessors, not the constants. A const captured at module-eval
+// time cannot be repointed afterwards, which made the resolver untestable and would also
+// diverge from reality if anything set the env after import.
+export function localCollabsRoot() {
+  return resolve(process.env.COLLAB_LOCAL_ROOT || join(homedir(), '.collab/local'));
+}
+export function githubReposRoot() {
+  return resolve(process.env.COLLAB_REPOS_ROOT || join(homedir(), 'Documents/Projects'));
+}
+
+// Retained for callers and tests that assert the default location.
+export const LOCAL_COLLABS_ROOT = localCollabsRoot();
+export const GITHUB_REPOS_ROOT  = githubReposRoot();
 
 const TRANSPORT_RE = /^(localhost|github:[a-z0-9_-]+)$/;
 const GITHUB_REPO_RE = /^github:([a-z0-9_-]+)$/;
@@ -49,9 +61,9 @@ export function resolveTransportPaths(transport, dirName) {
   if (!p) throw new Error(`unknown transport: ${transport}`);
   let collabDir;
   if (p.kind === 'localhost') {
-    collabDir = join(LOCAL_COLLABS_ROOT, dirName);
+    collabDir = join(localCollabsRoot(), dirName);
   } else {
-    collabDir = join(GITHUB_REPOS_ROOT, p.repo, 'collabs', dirName);
+    collabDir = join(githubReposRoot(), p.repo, 'collabs', dirName);
   }
   return { collabDir, eventsDir: join(collabDir, 'events'), turnsDir: join(collabDir, 'turns') };
 }
@@ -59,8 +71,8 @@ export function resolveTransportPaths(transport, dirName) {
 export function collabsRootForTransport(transport) {
   const p = parseTransport(transport);
   if (!p) throw new Error(`unknown transport: ${transport}`);
-  if (p.kind === 'localhost') return LOCAL_COLLABS_ROOT;
-  return join(GITHUB_REPOS_ROOT, p.repo, 'collabs');
+  if (p.kind === 'localhost') return localCollabsRoot();
+  return join(githubReposRoot(), p.repo, 'collabs');
 }
 
 function _preflight(rootDir) {

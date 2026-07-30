@@ -25,6 +25,9 @@ const SLUG = 'symlinked-repo-channel';
 const DATED = `2026-07-30-${SLUG}`;
 const TRIPLET = 'test-ws@claude-code:tester';
 
+const LOCAL_PIN = '515151';
+const LOCAL_SLUG = 'a-localhost-only-channel';
+
 /**
  * Build a fixture with a REAL repo and a SYMLINKED repo, each holding one channel.
  * Layout:
@@ -122,6 +125,93 @@ test('1b: an explicit unresolved slug or PIN never becomes kickoff and never cre
     // A failed lookup must have zero side effects on the store.
     const after = readdirSync(join(projects, 'realrepo', 'collabs')).sort();
     assert.deepEqual(after, before, 'a failed resolution created or removed a channel');
+  } finally {
+    process.env.COLLAB_REPOS_ROOT = prev.r; process.env.COLLAB_LOCAL_ROOT = prev.l;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Class 1c — a channel must be resolvable by bare slug and bare PIN regardless of which
+ * transport it lives on.
+ *
+ * `/collab` SKILL.md: "On join, tick, status, and abort, the route script resolves the
+ * transport from disk by finding the slug across all known transports — so the prefix is
+ * informational and can be omitted." The code scoped the lookup to a single transport,
+ * defaulting to github:files, so a localhost channel returned `fuzzy` unless the caller
+ * happened to pass the `localhost` prefix.
+ *
+ * Live reproduction (D9): the WP4 review channel was created on localhost per the ratified
+ * class-25 rule, and then could not be found by its own slug or PIN. A peer told "look at
+ * slug X" gets fuzzy, and the guidance invites treating fuzzy as kickoff — which forks a
+ * duplicate channel. The ratified same-machine transport was the one the router could not
+ * find by default.
+ */
+function makeLocalFixture() {
+  const base = mkdtempSync(join(tmpdir(), 'collab-xtransport-'));
+  const localRoot = join(base, 'local');
+  const projects = join(base, 'projects');
+  // A git repo root that exists but does NOT contain the localhost slug, so a passing
+  // test cannot be explained by the github view accidentally holding it.
+  mkdirSync(join(projects, 'somerepo', 'collabs'), { recursive: true });
+
+  const evDir = join(localRoot, `2026-07-30-${LOCAL_SLUG}`, 'events');
+  mkdirSync(evDir, { recursive: true });
+  const kickoff = {
+    event_id: 'evt-001', ts: '2026-07-30T00:00:00.000Z', author: TRIPLET,
+    slug: LOCAL_SLUG, type: 'kickoff', references: [],
+    payload: { message: 'fixture', pin: LOCAL_PIN, wall_clock_hours: 24 },
+  };
+  writeFileSync(join(evDir, 'evt-001.json'), JSON.stringify(kickoff, null, 2));
+  return { base, localRoot, projects };
+}
+
+test('1c: a localhost channel resolves by bare slug with no transport prefix', async () => {
+  const { base, localRoot, projects } = makeLocalFixture();
+  const prev = { r: process.env.COLLAB_REPOS_ROOT, l: process.env.COLLAB_LOCAL_ROOT };
+  try {
+    const route = await freshRoute(projects, localRoot);
+    const state = route.buildStateFromDisk(TRIPLET);
+    const r = route.detectAction(`look at slug ${LOCAL_SLUG}`, state);
+
+    assert.notEqual(r.route, 'fuzzy', 'localhost channel was not found without an explicit prefix');
+    assert.notEqual(r.route, 'kickoff', 'unresolved-looking lookup fell through to kickoff — forks a duplicate channel');
+    assert.equal(r.slug, LOCAL_SLUG);
+    // The transport must be the one the channel actually lives on, not the default.
+    assert.equal(r.transport, 'localhost', `resolved to the wrong transport: ${r.transport}`);
+  } finally {
+    process.env.COLLAB_REPOS_ROOT = prev.r; process.env.COLLAB_LOCAL_ROOT = prev.l;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('1c: a localhost channel resolves by bare PIN with no transport prefix', async () => {
+  const { base, localRoot, projects } = makeLocalFixture();
+  const prev = { r: process.env.COLLAB_REPOS_ROOT, l: process.env.COLLAB_LOCAL_ROOT };
+  try {
+    const route = await freshRoute(projects, localRoot);
+    const state = route.buildStateFromDisk(TRIPLET);
+    const r = route.detectAction(LOCAL_PIN, state);
+
+    assert.notEqual(r.route, 'fuzzy', 'localhost channel was not found by PIN without an explicit prefix');
+    assert.notEqual(r.route, 'kickoff', 'PIN lookup fell through to kickoff — forks a duplicate channel');
+    assert.equal(r.slug, LOCAL_SLUG);
+    assert.equal(r.transport, 'localhost', `resolved to the wrong transport: ${r.transport}`);
+  } finally {
+    process.env.COLLAB_REPOS_ROOT = prev.r; process.env.COLLAB_LOCAL_ROOT = prev.l;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('1c: an explicit transport prefix still wins when the slug exists there', async () => {
+  const { base, localRoot, projects } = makeLocalFixture();
+  const prev = { r: process.env.COLLAB_REPOS_ROOT, l: process.env.COLLAB_LOCAL_ROOT };
+  try {
+    const route = await freshRoute(projects, localRoot);
+    const state = route.buildStateFromDisk(TRIPLET);
+    const r = route.detectAction(`look at slug ${LOCAL_SLUG}`, state, 'localhost');
+    assert.equal(r.transport, 'localhost');
+    assert.equal(r.slug, LOCAL_SLUG);
   } finally {
     process.env.COLLAB_REPOS_ROOT = prev.r; process.env.COLLAB_LOCAL_ROOT = prev.l;
     rmSync(base, { recursive: true, force: true });
