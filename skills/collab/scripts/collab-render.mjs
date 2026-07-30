@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
-  checkSafetyNets, gitCommitPush, authorSlugFromTriplet,
+  checkSafetyNets, gitCommitPush, authorSlugFromTriplet, reconcileForeignSurface,
   renderEventsJsonl,
   STALL_TICKS, TICK_INTERVAL_MS,
 } from './collab-event-helpers.mjs';
@@ -84,6 +84,19 @@ export async function render(slug, options = {}) {
   const { collabDir, author, dryRun = false } = options;
   const dir = collabDir || findCollabDir(slug);
   if (!dir) throw new Error(`no collab directory: ${slug}`);
+
+  // Import anything a legacy JSONL-only writer left in events.jsonl BEFORE rendering over
+  // it. Rendering rebuilds that file from events/, so an unimported peer event would be
+  // destroyed with no error — that is how a peer's turn was lost in this project (D5).
+  // Automatic and recorded: reconcile emits a `reconciled` event naming what it imported.
+  const rec = reconcileForeignSurface(dir, author);
+  if (rec.imported.length > 0 || rec.escalated.length > 0) {
+    process.stderr.write(
+      `(reconcile) imported ${rec.imported.length} foreign event(s)` +
+      (rec.escalated.length ? `, escalated ${rec.escalated.length}: ${JSON.stringify(rec.escalated)}` : '') + '\n',
+    );
+  }
+
   const events = readEvents(dir);
 
   writeFileSync(join(dir, 'STATUS.md'), buildStatusMd(events, slug));

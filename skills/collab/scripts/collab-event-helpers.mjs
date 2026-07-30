@@ -293,8 +293,131 @@ export function appendEvent(collabDir, event) {
   }
 }
 
+// --- Foreign-surface detection and reconcile ---
+//
+// events.jsonl is a RENDER, not an authority. But a legacy v0.1.x writer appends ONLY
+// there, so its events exist nowhere else. Rebuilding events.jsonl from events/ without
+// first importing them destroys them — silently, with no error on either side. That is
+// exactly what happened to a peer's turn in this project (D5).
+
+/**
+ * Split events.jsonl into events absent from canonical (`foreign`) and lines that cannot
+ * be parsed into an event at all (`malformed`).
+ */
+export function foreignSurfaceEvents(collabDir) {
+  const eventsDir = join(collabDir, 'events');
+  const jsonlPath = join(collabDir, 'events.jsonl');
+  if (!existsSync(eventsDir) || !existsSync(jsonlPath)) return { foreign: [], malformed: [] };
+
+  const canonical = new Set(
+    readdirSync(eventsDir)
+      .filter(f => f.endsWith('.json') && !f.startsWith('.'))
+      .map(f => f.slice(0, -'.json'.length)),
+  );
+
+  const foreign = [], malformed = [];
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    let e;
+    try { e = JSON.parse(line); }
+    catch (err) { malformed.push({ line: i + 1, reason: `unparseable JSON: ${err.message}` }); continue; }
+    if (!e || typeof e !== 'object' || !e.event_id || !e.ts) {
+      malformed.push({ line: i + 1, reason: 'missing event_id or ts' });
+      continue;
+    }
+    if (canonical.has(e.event_id)) continue;
+    foreign.push(e);
+  }
+  return { foreign, malformed };
+}
+
+/**
+ * True when events.jsonl holds real events that canonical does not — i.e. rendering now
+ * would destroy them.
+ *
+ * Malformed lines deliberately do NOT block: an unparseable line in a render artifact
+ * carries no recoverable event, so treating it as a permanent block would convert a
+ * garbage byte into an indefinite stall — a self-inflicted silent stop. They still
+ * escalate through reconcile so they are visible.
+ */
+export function hasUnreconciledForeignEvents(collabDir) {
+  return foreignSurfaceEvents(collabDir).foreign.length > 0;
+}
+
+/**
+ * Import foreign events into canonical, automatically. Returns { imported, escalated }.
+ *
+ * Automatic by design: "explicit" means recorded and bounded, not waiting for a human. A
+ * self-healing system that stops to ask is just a slower stop. Import requires the event
+ * to be parseable, to belong to THIS channel, and to be non-conflicting; anything else
+ * escalates instead of being imported, and a rejected event never halts the import of the
+ * valid events beside it.
+ */
+export function reconcileForeignSurface(collabDir, author) {
+  const { foreign, malformed } = foreignSurfaceEvents(collabDir);
+  const imported = [], escalated = [];
+
+  for (const m of malformed) {
+    escalated.push({ event_id: null, line: m.line, reason: m.reason });
+  }
+  if (foreign.length === 0) return { imported, escalated };
+
+  // Channel identity comes from the canonical kickoff, never from the foreign event.
+  const canonicalEvents = readEvents(collabDir);
+  const slug = canonicalEvents.find(e => e.type === 'kickoff')?.slug
+    ?? canonicalEvents[0]?.slug ?? null;
+
+  for (const e of foreign) {
+    if (slug && e.slug !== slug) {
+      escalated.push({ event_id: e.event_id, reason: `channel mismatch: event slug "${e.slug}" != "${slug}"` });
+      continue;
+    }
+    try {
+      appendEvent(collabDir, e);
+      imported.push(e.event_id);
+    } catch (err) {
+      escalated.push({
+        event_id: e.event_id,
+        reason: err.code === 'EEVENTCONFLICT' ? 'id already exists with different content' : err.message,
+      });
+    }
+  }
+
+  // The heal must be observable. A silent repair is indistinguishable from a bug.
+  if (imported.length > 0 && author) {
+    const ts = new Date().toISOString();
+    appendEvent(collabDir, {
+      event_id: generateEventId(ts, authorSlugFromTriplet(author)),
+      ts, author, slug: slug ?? '', type: 'reconciled', references: imported,
+      payload: {
+        imported, escalated,
+        source_surface: 'events.jsonl',
+        note: 'Imported events written by a legacy JSONL-only writer that canonical did not hold.',
+      },
+    });
+  }
+  return { imported, escalated };
+}
+
 // Regenerate events.jsonl from events/ dir (render artifact, not source of truth).
+//
+// Refuses when events.jsonl holds real events canonical does not — rendering would destroy
+// a legacy writer's turn. The guard lives here, at the writer boundary, so every caller
+// inherits it regardless of call order or entry point; callers reconcile first.
 export function renderEventsJsonl(collabDir) {
+  const { foreign } = foreignSurfaceEvents(collabDir);
+  if (foreign.length > 0) {
+    const err = new Error(
+      `Refusing to render events.jsonl in ${collabDir}: ${foreign.length} unreconciled foreign ` +
+      `event(s) present that canonical does not hold (${foreign.map(e => e.event_id).join(', ')}). ` +
+      `Rendering would destroy them. Run reconcileForeignSurface() first.`,
+    );
+    err.code = 'EUNRECONCILEDFOREIGN';
+    err.foreignIds = foreign.map(e => e.event_id);
+    throw err;
+  }
   const events = readEvents(collabDir);
   const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
   writeFileSync(join(collabDir, 'events.jsonl'), content);
