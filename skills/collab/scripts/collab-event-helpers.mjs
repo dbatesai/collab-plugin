@@ -92,13 +92,10 @@ export function deriveSlug(message) {
 // Lexicographic sort on event_id is NOT relied on for ordering — readEvents sorts
 // by `ts` then event_id (v1.0 invariant). The suffix exists only for uniqueness.
 //
-// Entropy: the author component is PERSISTED (it derives from the workspace/participant
-// identity), so two concurrent processes — or one process after a restart — reuse it. A
-// short random field then carries the whole collision burden, and a per-process counter
-// adds nothing across processes because each starts its own sequence at zero. That was the
-// prior scheme: 4 random bytes plus a base36 counter. randomUUID() is stdlib, is less code
-// than what it replaces, and moves the collision bound somewhere it stops being a design
-// risk. Format invariant preserved: evt-<minute-stamp>-<author>-<suffix>.
+// The author component is PERSISTED, so concurrent processes and restarts share it. The
+// random component therefore carries the whole collision burden and must be UUID-grade; a
+// short nonce plus a per-process counter does not, because each process restarts its
+// sequence at zero.
 export function generateEventId(tsIso, authorSlug) {
   const d = new Date(tsIso);
   const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -262,12 +259,10 @@ export function appendEvent(collabDir, event) {
   const body = JSON.stringify(event, null, 2);
   writeFileSync(tmpPath, body);
 
-  // Create the final name exclusively. `rename()` is atomic but NOT exclusive — POSIX
-  // rename silently REPLACES an existing destination, which would turn a same-id conflict
-  // into a silent overwrite and lose a peer's event with no error anywhere. `link()` fails
-  // EEXIST instead, so the already-committed event always wins and the second writer is
-  // told. Writing the temp first is still required: a bare O_CREAT|O_EXCL open would leave
-  // a window where a reader could see a partially-written file.
+  // Exclusive create. rename() is atomic but replaces an existing destination silently, so
+  // a same-id conflict would overwrite a committed event; link() fails EEXIST instead. The
+  // temp write stays because O_CREAT|O_EXCL alone leaves a window where a reader sees a
+  // partial file.
   try {
     linkSync(tmpPath, finalPath);
     unlinkSync(tmpPath);            // link made a second name for the same inode
@@ -288,17 +283,15 @@ export function appendEvent(collabDir, event) {
       `The committed event was NOT replaced. Emit this event under a fresh id, and record the conflict.`,
     );
     err.code = 'EEVENTCONFLICT';
-    err.eventId = event.event_id;
     throw err;
   }
 }
 
 // --- Foreign-surface detection and reconcile ---
 //
-// events.jsonl is a RENDER, not an authority. But a legacy v0.1.x writer appends ONLY
-// there, so its events exist nowhere else. Rebuilding events.jsonl from events/ without
-// first importing them destroys them — silently, with no error on either side. That is
-// exactly what happened to a peer's turn in this project (D5).
+// events.jsonl is a render, not an authority — but a legacy v0.1.x writer appends only
+// there, so its events exist nowhere else. Rendering rebuilds that file from events/, so
+// foreign events must be imported first or they are destroyed with no error.
 
 /**
  * Split events.jsonl into events absent from canonical (`foreign`) and lines that cannot
@@ -334,26 +327,11 @@ export function foreignSurfaceEvents(collabDir) {
 }
 
 /**
- * True when events.jsonl holds real events that canonical does not — i.e. rendering now
- * would destroy them.
+ * Import foreign events into canonical. Returns { imported, escalated }.
  *
- * Malformed lines deliberately do NOT block: an unparseable line in a render artifact
- * carries no recoverable event, so treating it as a permanent block would convert a
- * garbage byte into an indefinite stall — a self-inflicted silent stop. They still
- * escalate through reconcile so they are visible.
- */
-export function hasUnreconciledForeignEvents(collabDir) {
-  return foreignSurfaceEvents(collabDir).foreign.length > 0;
-}
-
-/**
- * Import foreign events into canonical, automatically. Returns { imported, escalated }.
- *
- * Automatic by design: "explicit" means recorded and bounded, not waiting for a human. A
- * self-healing system that stops to ask is just a slower stop. Import requires the event
- * to be parseable, to belong to THIS channel, and to be non-conflicting; anything else
- * escalates instead of being imported, and a rejected event never halts the import of the
- * valid events beside it.
+ * Runs without human input: recovery that stops to ask is just a slower stop. Import
+ * requires the event to be parseable, to belong to this channel, and to be non-conflicting.
+ * Anything else escalates, and a rejected event never halts the valid events beside it.
  */
 export function reconcileForeignSurface(collabDir, author) {
   const { foreign, malformed } = foreignSurfaceEvents(collabDir);
@@ -401,11 +379,10 @@ export function reconcileForeignSurface(collabDir, author) {
   return { imported, escalated };
 }
 
-// Regenerate events.jsonl from events/ dir (render artifact, not source of truth).
+// Regenerate events.jsonl from events/ (render artifact, not source of truth).
 //
-// Refuses when events.jsonl holds real events canonical does not — rendering would destroy
-// a legacy writer's turn. The guard lives here, at the writer boundary, so every caller
-// inherits it regardless of call order or entry point; callers reconcile first.
+// Refuses when events.jsonl holds events canonical does not, since rendering would destroy
+// them. The guard is at the writer boundary so every caller inherits it; reconcile first.
 export function renderEventsJsonl(collabDir) {
   const { foreign } = foreignSurfaceEvents(collabDir);
   if (foreign.length > 0) {

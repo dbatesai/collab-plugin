@@ -123,10 +123,8 @@ export function quarantineInvalidV1Events(collabDir, opts = {}) {
       quarantineEvent(collabDir, event, v.reason, opts);
       report.quarantined.push({ event_id: event.event_id, reason: v.reason });
 
-      // Preserving bytes is necessary and NOT sufficient. Without a routed notice the only
-      // path from "quarantined" to "anyone knows" runs through a peer happening to look in
-      // the directory — which is how a valid DG1 ACCEPT nearly went unseen while every
-      // participant reported the author silent.
+      // Preserving bytes is not sufficient: without a routed notice, the only path from
+      // "quarantined" to "anyone knows" runs through a peer inspecting the directory.
       if (opts.author && !alreadyNoticed.has(event.event_id)) {
         const notice = emitQuarantineNotice(collabDir, event, v.reason, opts);
         alreadyNoticed.add(event.event_id);
@@ -141,10 +139,8 @@ export function quarantineInvalidV1Events(collabDir, opts = {}) {
 
 /**
  * Emit a routed `quarantined` event so a suppressed peer event is visible through a normal
- * receive cycle rather than only by directory inspection.
- *
- * Carries provenance so the notice itself satisfies v1 validation — a notice that got
- * quarantined on the next scan would be its own bug.
+ * receive cycle rather than only by directory inspection. Carries provenance so the notice
+ * itself passes v1 validation and cannot be quarantined by the next scan.
  */
 function emitQuarantineNotice(collabDir, event, reason, opts = {}) {
   const now = opts.now || (() => new Date().toISOString());
