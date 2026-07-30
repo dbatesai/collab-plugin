@@ -4,6 +4,40 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [1.1.0] — 2026-07-30
+
+Communication-protocol hardening. Nineteen defects were found by three agents trying to hold a real conversation on this protocol; eighteen are closed here. None of them threw an error — every one reported success while doing the wrong thing, which is why the whole release is organised around making failure loud.
+
+### Behavior changes for existing callers
+These are strictly safer, but they are not invisible.
+- `generateEventId` emits a UUIDv4 suffix. The author component is persisted and therefore shared across concurrent processes and restarts, so a short nonce plus a per-process counter could not carry the collision burden. Sequential ids are migration-only.
+- `appendEvent` throws `EEVENTCONFLICT` on same-id/different-content rather than overwriting. `rename` is atomic but not exclusive; `link` fails `EEXIST`. Byte-identical re-append stays idempotent so recovery retries still work.
+- `renderEventsJsonl` throws `EUNRECONCILEDFOREIGN` when `events.jsonl` holds events canonical lacks, rather than destroying them.
+- `detectAction` returns `transport: null` plus a candidate list when a slug exists on two transports, rather than selecting the first.
+- Foreign-surface import requires an authorized source, evaluated at the event's position. Events whose author has no active canonical join are escalated.
+- Git operations serialise behind a leased repo claim and fail closed on timeout or non-zero status.
+
+### Added
+- Foreign-surface detection with automatic, recorded reconcile. A legacy JSONL-only writer's events survive another participant's render.
+- Routed `quarantined` events naming the offending id, author, and exact validation reason. Preserving bytes on disk announced nothing, so a suppressed event was visible only to whoever inspected the directory.
+- Leased, generation-numbered repo-operation claim. A crashed holder cannot wedge the repo; a resurrected one cannot release someone else's claim.
+- Obligation scanner: chase past grace, then execute the participant's declared `on_timeout`, and escalate when a window contains only bookkeeping. Chase alone had no terminus.
+- Drift-detecting prose evals that compare documentation against code.
+- CI gate failing on non-zero `todo`, since `node --test` exits 0 on todo.
+
+### Fixed
+- Symlinked repo roots hid an entire transport: `Dirent.isDirectory()` is false for symlinks.
+- localhost channels were unresolvable by bare slug or PIN while the documentation promised cross-transport resolution.
+- Sequential event ids silently dropped a peer's turn on merge.
+- Documentation instructed agents to treat an unresolved reference as a new channel, forking the collaboration.
+- A documented join snippet did not run: `gitPullRebase()` was shown without its required transport argument.
+- Two `state` vocabularies collided on one field name; the goal lifecycle now binds to `goal_state`.
+
+### Known gaps
+- 15 of 25 failure classes have tests. The remaining 10 are recorded as UNKNOWN rather than assumed.
+- Kickoff still defaults to `github:files` when the transport token is omitted. Changing that default alters behavior for every existing caller and is deliberately unshipped.
+- Cross-machine git contention is out of scope.
+
 ## [1.0.0] — 2026-05-29
 
 First stable release — the v1.0 autonomous loop protocol. An agent can now start a hands-off loop instead of hand-firing each tick: it polls on a dynamic cadence ladder, chases a silent partner on a deterministic schedule, and quarantines malformed v1 events before they reach routing. The release is feature-complete with 241 passing tests, and the design was reviewed and ratified end-to-end by an independent Codex agent. The first live cross-harness exercise of the v1.0 loop is still pending — recommended right before or right after merge.
