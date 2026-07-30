@@ -110,7 +110,10 @@ export function detectAction(message, state, explicitTransport) {
   const holders = extractedSlug && !explicitTransport ? transportsHoldingSlug(state, extractedSlug) : [];
   if (holders.length > 1) {
     return {
-      route: 'fuzzy', extractedSlug, transport: holders[0], candidates: holders,
+      // No chosen transport: returning holders[0] would leak the same arbitrary first pick
+      // to any caller that reads `transport`, so the refusal would look safe while still
+      // handing one over.
+      route: 'fuzzy', extractedSlug, transport: null, candidates: holders,
       reason: `slug "${extractedSlug}" exists on ${holders.length} transports (${holders.join(', ')}); ` +
               'route with an explicit transport prefix, or remove the duplicate',
     };

@@ -349,21 +349,40 @@ export function reconcileForeignSurface(collabDir, author) {
 
   // Authorized source: membership is a fact established by canonical kickoff/join events,
   // never inferred from the event's own author field. Without this, anything able to append
-  // to events.jsonl can forge a turn under any identity and have it become canonical,
-  // bypassing join entirely.
-  const authorized = new Set(
-    canonicalEvents.filter(e => e.type === 'kickoff' || e.type === 'join').map(e => e.author),
-  );
+  // to events.jsonl can forge a turn under any identity and have it become canonical.
+  //
+  // This is AUTHORIZATION, not authentication. A writer with filesystem access can still
+  // spoof a joined triplet; what this establishes is that the claimed identity was a member
+  // of this channel at the event's position — not that the writer is who they say.
+  //
+  // Evaluated causally: "ever joined" would admit an event authored before its author
+  // joined, and one authored after they withdrew. Identity is compared exactly — a triplet
+  // differing by punctuation is a different identity, repaired by an explicit rejoin, never
+  // by normalizing the string.
+  const membership = canonicalEvents
+    .filter(e => e.type === 'kickoff' || e.type === 'join' || e.type === 'withdraw')
+    .map(e => ({ author: e.author, ts: e.ts, joins: e.type !== 'withdraw' }));
+
+  const authorizedAt = (author, ts) => {
+    let member = false;
+    for (const m of membership) {
+      if (m.author !== author || m.ts > ts) continue;
+      member = m.joins;                       // last transition at or before ts wins
+    }
+    return member;
+  };
 
   for (const e of foreign) {
     if (slug && e.slug !== slug) {
       escalated.push({ event_id: e.event_id, reason: `channel mismatch: event slug "${e.slug}" != "${slug}"` });
       continue;
     }
-    if (!authorized.has(e.author)) {
+    if (!authorizedAt(e.author, e.ts)) {
       escalated.push({
         event_id: e.event_id,
-        reason: `unauthorized author: "${e.author}" has no canonical kickoff or join in this channel`,
+        reason: `unauthorized author at event position: "${e.author}" had no active canonical ` +
+                `kickoff/join at or before ${e.ts} (or had withdrawn). An identity that differs ` +
+                'even by punctuation is a different member; repair with an explicit rejoin.',
       });
       continue;
     }
@@ -725,12 +744,25 @@ export function withRepoClaim(repo, owner, fn) {
 
 export function gitPullRebase(transport, owner = `pid-${process.pid}`) {
   const repo = repoForTransport(transport);
-  return withRepoClaim(repo, owner, () => {
-    const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
-    // Throws rather than returning empty: a caller that swallows this reports a quiet
-    // channel, which is indistinguishable from no peer activity.
-    if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
-  });
+  // Throws rather than returning empty: a caller that swallows this reports a quiet
+  // channel, which is indistinguishable from no peer activity.
+  return withRepoClaim(repo, owner, () => { runGit(repo, ['pull', '--rebase']); });
+}
+
+// Every git call goes through here. An unchecked spawnSync discards status, signal and
+// timeout, so a failed add or commit followed by a push that exits 0 reports success while
+// the event was never committed.
+function runGit(repo, args, { allowFail = false } = {}) {
+  const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
+  const ok = !r.error && r.status === 0;
+  if (!ok && !allowFail) {
+    const why = r.error ? (r.error.code === 'ETIMEDOUT' ? `timed out after ${GIT_OP_TIMEOUT_MS}ms` : r.error.message)
+                        : `exit ${r.status}: ${(r.stderr || '').trim()}`;
+    const err = new Error(`git ${args[0]} failed in ${repo}: ${why}`);
+    err.code = 'EGITOP';
+    throw err;
+  }
+  return { ok, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
 export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${process.pid}`) {
@@ -738,12 +770,12 @@ export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${pr
   // Serialized with pull: add/commit/push and the rebase inside the retry all mutate the
   // same working copy and shared refs, so a concurrent agent mid-sequence is the race.
   return withRepoClaim(repo, owner, () => {
-    spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
-    spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
+    runGit(repo, ['add', collabDir]);
+    runGit(repo, ['commit', '-m', commitMsg, '--allow-empty']);
     for (let i = 1; i <= 3; i++) {
-      const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
-      if (push.status === 0) return;
-      spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8', timeout: GIT_OP_TIMEOUT_MS });
+      // Push may legitimately fail (peer landed first); the rebase that follows may not.
+      if (runGit(repo, ['push'], { allowFail: true }).ok) return;
+      runGit(repo, ['pull', '--rebase']);
     }
     throw new Error(`git push failed after 3 attempts in ${repo}`);
   });

@@ -121,17 +121,19 @@ test('A1: the guarded critical section is bounded strictly below the claim lease
   );
 });
 
-test('A1: every git spawn inside a claim passes an explicit timeout', () => {
-  // Source-level: the defect is "a call that can hang forever", which cannot be reached by
-  // a unit test without a real network stall.
+test('A1: every git spawn passes an explicit timeout, and there is exactly one spawn site', () => {
+  // Source-level: the defect is "a call that can hang forever", unreachable by a unit test
+  // without a real network stall. One spawn site is the invariant that makes this checkable
+  // at all — a second one is a place the timeout can be forgotten.
   const src = readFileSync(join(HERE, '..', 'skills', 'collab', 'scripts', 'collab-event-helpers.mjs'), 'utf8');
-  const gitSpawns = [...src.matchAll(/spawnSync\('git',\s*\[[^\]]*\][^)]*\)/g)].map(m => m[0]);
+  const gitSpawns = [...src.matchAll(/spawnSync\(\s*'git'[^;]*?\)/gs)].map(m => m[0]);
   assert.ok(gitSpawns.length > 0, 'no git spawnSync calls found — the extractor matched nothing');
-  const unbounded = gitSpawns.filter(c => !/timeout:/.test(c));
-  assert.deepEqual(
-    unbounded, [],
-    `git calls without a timeout can hang past the claim lease:\n  ${unbounded.join('\n  ')}`,
+  assert.equal(
+    gitSpawns.length, 1,
+    `expected a single checked git spawn site, found ${gitSpawns.length} — each extra site is ` +
+    'somewhere the timeout and status check can be omitted',
   );
+  assert.match(gitSpawns[0], /timeout:\s*GIT_OP_TIMEOUT_MS/, 'the git spawn site has no bounded timeout');
 });
 
 // ---------------------------------------------------------------- A2
@@ -175,5 +177,134 @@ test('A2: a slug present on two transports refuses to route instead of picking t
   } finally {
     process.env.COLLAB_REPOS_ROOT = prev.r; process.env.COLLAB_LOCAL_ROOT = prev.l;
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------- Hale's follow-up gaps
+
+/**
+ * Hale's review of the WP4 fixes found three more holes. All three are the same shape as
+ * everything else here: the code reports success or safety while doing the wrong thing.
+ */
+
+test('H1: every git operation is checked — a failed add/commit cannot report success', () => {
+  // gitCommitPush ignored the result of `git add`, `git commit`, and the retry pull. A
+  // timed-out add followed by a push that happens to exit 0 returns success while the event
+  // was never committed: the caller believes it published, and nothing did.
+  const src = readFileSync(join(HERE, '..', 'skills', 'collab', 'scripts', 'collab-event-helpers.mjs'), 'utf8');
+  const start = src.indexOf('export function gitCommitPush');
+  assert.ok(start >= 0, 'gitCommitPush not found');
+  const body = src.slice(start, src.indexOf('\n}', start) + 2);
+  assert.ok(body.length > 100, `extracted an empty/short function body (${body.length} chars) — a vacuous pass`);
+
+  const bare = [...body.matchAll(/spawnSync\(/g)];
+  assert.deepEqual(
+    bare.map(m => m[0]), [],
+    'raw spawnSync in gitCommitPush — its status is discarded, so a failure is silent',
+  );
+  assert.ok(/runGit\(/.test(body), 'gitCommitPush should route every operation through the checked runner');
+
+  // The push is the ONLY call permitted to fail without throwing (a peer may have landed
+  // first). Anything else tolerating failure is a silent-success path.
+  const allowFail = [...body.matchAll(/runGit\([^;]*allowFail[^;]*\)/g)].map(m => m[0]);
+  assert.equal(allowFail.length, 1, `expected exactly one allowFail call (push), found ${allowFail.length}`);
+  assert.match(allowFail[0], /'push'/, 'a non-push git operation is allowed to fail silently');
+});
+
+test('H2: an ambiguous route carries NO chosen transport, only candidates', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'collab-h2-'));
+  const prev = { r: process.env.COLLAB_REPOS_ROOT, l: process.env.COLLAB_LOCAL_ROOT };
+  try {
+    const dup = 'ambiguous-no-transport';
+    const localRoot = join(base, 'local');
+    const projects = join(base, 'projects');
+    const mk = (root, pin) => {
+      const evDir = join(root, `2026-07-30-${dup}`, 'events');
+      mkdirSync(evDir, { recursive: true });
+      writeFileSync(join(evDir, 'evt-001.json'), JSON.stringify({
+        event_id: 'evt-001', ts: '2026-07-30T00:00:00.000Z', author: OWNER,
+        slug: dup, type: 'kickoff', references: [], payload: { message: 'x', pin },
+      }, null, 2));
+    };
+    mk(localRoot, '777888');
+    mk(join(projects, 'somerepo', 'collabs'), '999000');
+
+    process.env.COLLAB_REPOS_ROOT = projects;
+    process.env.COLLAB_LOCAL_ROOT = localRoot;
+    const route = await import(`../skills/collab/scripts/collab-route.mjs?h2=${Date.now()}`);
+    const r = route.detectAction(`look at slug ${dup}`, route.buildStateFromDisk(OWNER));
+
+    assert.equal(r.route, 'fuzzy');
+    // Returning transport: holders[0] leaks the arbitrary first choice to any caller that
+    // reads `transport` — the refusal looks safe while still handing over a pick.
+    assert.ok(
+      r.transport === null || r.transport === undefined,
+      `ambiguous route still carried a chosen transport (${r.transport}) — callers reading it get the arbitrary first match`,
+    );
+    assert.equal(r.candidates.length, 2);
+  } finally {
+    process.env.COLLAB_REPOS_ROOT = prev.r; process.env.COLLAB_LOCAL_ROOT = prev.l;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('H3: membership is evaluated at the event position — not "ever joined"', () => {
+  // An ever-joined set admits an event authored BEFORE the author joined, and one authored
+  // AFTER they withdrew. Authorization has to be causal.
+  const early = { ...ev('evt-before-join', MEMBER, 'authored before joining'), ts: '2026-07-30T03:00:00.000Z' };
+  const dir = mkChannel([early]);
+  try {
+    const r = reconcileForeignSurface(dir, OWNER);
+    assert.ok(
+      !r.imported.includes('evt-before-join'),
+      'imported an event authored before its author joined — membership was treated as timeless',
+    );
+    assert.ok(
+      r.escalated.some(x => x.event_id === 'evt-before-join' && /join|member|authoriz/i.test(x.reason)),
+      'pre-join event was neither imported nor escalated with a membership reason',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H3: an event authored after withdrawal is not authorized', () => {
+  const dir = mkChannel([]);
+  try {
+    appendEvent(dir, {
+      event_id: 'evt-member-withdraw', ts: '2026-07-30T05:00:00.000Z', author: MEMBER,
+      slug: SLUG, type: 'withdraw', references: [], payload: {},
+    });
+    const late = { ...ev('evt-after-withdraw', MEMBER, 'authored after leaving'), ts: '2026-07-30T06:00:00.000Z' };
+    writeFileSync(
+      join(dir, 'events.jsonl'),
+      readFileSync(join(dir, 'events.jsonl'), 'utf8') + JSON.stringify(late) + '\n',
+    );
+    const r = reconcileForeignSurface(dir, OWNER);
+    assert.ok(
+      !r.imported.includes('evt-after-withdraw'),
+      'imported an event authored after its author withdrew',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('H4: a triplet differing only by punctuation is a DIFFERENT identity — no silent normalization', () => {
+  // Live finding: this machine's hostname changed mid-session, so deriveTriplet produced
+  // `…:JenniferAniston` where the join said `…:Jennifer-Aniston`. Silently normalizing
+  // punctuation would invent an identity equivalence the ledger never established — the
+  // repair is an explicit rejoin, not a string transform.
+  const drifted = ev('evt-drifted-identity', 'core-codex@codex:host-name', 'same agent, drifted hostname');
+  const dir = mkChannel([drifted]);   // MEMBER joined as 'core-codex@codex:host'
+  try {
+    const r = reconcileForeignSurface(dir, OWNER);
+    assert.ok(
+      !r.imported.includes('evt-drifted-identity'),
+      'a punctuation-drifted triplet was auto-authorized — identity equivalence must be established ' +
+      'by an explicit rejoin, never inferred from string similarity',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

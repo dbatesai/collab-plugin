@@ -249,3 +249,44 @@ test('D10: overlapping state vocabularies across documents must each name a dist
     );
   }
 });
+
+/**
+ * Layer boundary — collab owns communication, team-goal owns the goal.
+ *
+ * D10's root cause was not the state vocabulary itself; it was that the team-goal spec
+ * declared its own copy of a contract collab owns. A rule with two homes drifts, and the
+ * drift is invisible until a peer emits a value one side rejects.
+ *
+ * This test fails if the team-goal spec starts re-specifying collab-owned mechanics again.
+ * Cross-repo by necessity; skips cleanly when the spec is absent.
+ */
+test('boundary: the team-goal spec does not restate collab-owned communication rules', () => {
+  const SHARED_SPEC = join(HERE, '..', '..', 'CORE', 'dev', 'team-goal', 'team_goal_shared_spec.md');
+  let spec;
+  try { spec = readFileSync(SHARED_SPEC, 'utf8'); }
+  catch { return; }
+
+  // Each entry: a collab-owned mechanic, and the pattern that means the spec is DEFINING it
+  // rather than referencing it. Referencing is fine and expected — the spec must be able to
+  // say "collab owns leases" without tripping this.
+  const owned = [
+    { what: 'required event fields', defines: /Typed event fields must include/i },
+    { what: 'the no-heartbeat rule', defines: /No heartbeat events are allowed/i },
+    { what: 'lease/chase thresholds', defines: /missed commitments receive grace, chase, then lease expiry/i },
+    { what: 'a state vocabulary bound to the bare field `state`', defines: /^\s*-?\s*Valid states:/im },
+  ];
+
+  const violations = owned.filter(o => o.defines.test(spec)).map(o => o.what);
+  assert.deepEqual(
+    violations, [],
+    'the team-goal spec is re-defining collab-owned mechanics instead of referencing them: ' +
+    `${violations.join('; ')}. Two copies of a communication rule drift, and the drift only ` +
+    'surfaces when a peer emits a value the other side rejects — that is exactly how D10 happened.',
+  );
+
+  // The boundary must be stated, not merely obeyed by accident.
+  assert.ok(
+    /collab owns/i.test(spec),
+    'the spec never states the ownership boundary, so the next editor has nothing to obey',
+  );
+});
