@@ -7,7 +7,7 @@
  */
 import {
   readFileSync, writeFileSync,
-  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync,
+  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { join, resolve, dirname } from 'node:path';
@@ -626,20 +626,101 @@ function repoForTransport(transport) {
   return dirname(collabsRootForTransport(transport));
 }
 
-export function gitPullRebase(transport) {
-  const repo = repoForTransport(transport);
-  const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
-  if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
+// --- Repo operation claim ---
+//
+// Several agents can share one working copy, and git's own shared mutable state (notably
+// .git/FETCH_HEAD) is not safe against concurrent operations: a concurrent fetch leaves
+// multiple branch entries and `git pull --rebase` then refuses outright. Serializing repo
+// operations behind an exclusive claim removes the race; the lease means a crashed holder
+// cannot wedge the repo, and the generation means a resurrected holder cannot release
+// someone else's claim.
+export const REPO_CLAIM_TTL_MS = 60_000;
+const REPO_CLAIM_MAX_ATTEMPTS = 6;
+
+function repoClaimPath(repo) { return join(repo, '.git', 'collab-repo-claim.json'); }
+
+/** Take the claim, or return null if another live owner holds it. */
+export function acquireRepoClaim(repo, owner, now = Date.now()) {
+  const claimPath = repoClaimPath(repo);
+  let generation = 1;
+
+  if (existsSync(claimPath)) {
+    let held = null;
+    try { held = JSON.parse(readFileSync(claimPath, 'utf8')); } catch { /* corrupt → reclaimable */ }
+    const age = now - statSync(claimPath).mtimeMs;
+    if (age < REPO_CLAIM_TTL_MS) return null;      // live owner
+    generation = (held?.generation ?? 0) + 1;       // expired lease → reclaim
+    try { unlinkSync(claimPath); } catch { /* raced; the link below decides */ }
+  }
+
+  const claim = { owner, generation, acquired_at: new Date(now).toISOString(), pid: process.pid };
+  const tmp = join(repo, '.git', `.tmp-claim-${process.pid}-${now}.json`);
+  writeFileSync(tmp, JSON.stringify(claim, null, 2));
+  try {
+    linkSync(tmp, claimPath);                       // exclusive: EEXIST if another won
+    return claim;
+  } catch {
+    return null;
+  } finally {
+    try { unlinkSync(tmp); } catch { /* best effort */ }
+  }
 }
 
-export function gitCommitPush(collabDir, transport, commitMsg) {
-  const repo = repoForTransport(transport);
-  spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8' });
-  spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8' });
-  for (let i = 1; i <= 3; i++) {
-    const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8' });
-    if (push.status === 0) return;
-    spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+/** Release only if this claim is still the one on disk. */
+export function releaseRepoClaim(repo, claim) {
+  const claimPath = repoClaimPath(repo);
+  if (!claim || !existsSync(claimPath)) return false;
+  try {
+    const held = JSON.parse(readFileSync(claimPath, 'utf8'));
+    if (held.owner !== claim.owner || held.generation !== claim.generation) return false;
+  } catch { return false; }
+  try { unlinkSync(claimPath); return true; } catch { return false; }
+}
+
+/** Run fn while holding the claim. Retries with bounded jitter; always releases. */
+export function withRepoClaim(repo, owner, fn) {
+  let claim = null;
+  for (let i = 0; i < REPO_CLAIM_MAX_ATTEMPTS && !claim; i++) {
+    claim = acquireRepoClaim(repo, owner);
+    if (!claim) {
+      const backoff = 50 * (i + 1) + Math.floor(Math.random() * 100);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoff);
+    }
   }
-  throw new Error(`git push failed after 3 attempts in ${repo}`);
+  if (!claim) {
+    const err = new Error(
+      `repo claim unavailable in ${repo} after ${REPO_CLAIM_MAX_ATTEMPTS} attempts — another agent ` +
+      'is holding it. This is a degraded transport state, not an empty result.',
+    );
+    err.code = 'EREPOCLAIMBUSY';
+    throw err;
+  }
+  try { return fn(); }
+  finally { releaseRepoClaim(repo, claim); }
+}
+
+export function gitPullRebase(transport, owner = `pid-${process.pid}`) {
+  const repo = repoForTransport(transport);
+  return withRepoClaim(repo, owner, () => {
+    const r = spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+    // Throws rather than returning empty: a caller that swallows this reports a quiet
+    // channel, which is indistinguishable from no peer activity.
+    if (r.status !== 0) throw new Error(`git pull --rebase failed in ${repo}: ${r.stderr}`);
+  });
+}
+
+export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${process.pid}`) {
+  const repo = repoForTransport(transport);
+  // Serialized with pull: add/commit/push and the rebase inside the retry all mutate the
+  // same working copy and shared refs, so a concurrent agent mid-sequence is the race.
+  return withRepoClaim(repo, owner, () => {
+    spawnSync('git', ['add', collabDir], { cwd: repo, encoding: 'utf8' });
+    spawnSync('git', ['commit', '-m', commitMsg, '--allow-empty'], { cwd: repo, encoding: 'utf8' });
+    for (let i = 1; i <= 3; i++) {
+      const push = spawnSync('git', ['push'], { cwd: repo, encoding: 'utf8' });
+      if (push.status === 0) return;
+      spawnSync('git', ['pull', '--rebase'], { cwd: repo, encoding: 'utf8' });
+    }
+    throw new Error(`git push failed after 3 attempts in ${repo}`);
+  });
 }
