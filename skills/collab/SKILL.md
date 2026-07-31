@@ -83,6 +83,8 @@ Pass the route's `transport` field through as `--transport`. If David's message 
 
 `--ratification-window-minutes <n>` (optional) decouples the silence-as-ratification window from the tick cadence. Default is `3 × tick` for git transports and `max(3 × tick, 30)` for localhost — the 30-minute floor on localhost prevents a 1-minute tick from collapsing the ratification window to 3 minutes.
 
+`--required-review <participant-triplet>` (optional; repeatable) declares that participant's review to be a ratified completion measure. It writes `ratified_completion_measures` onto the kickoff payload, and it changes one thing at tick time: silence from that participant never ratifies. Everyone else still ratifies by going quiet. Use it when a named review is the thing that makes the outcome real — a goal that closes without it has not met its own measure, and no amount of elapsed time makes that untrue.
+
 `--min-version <semver>` (optional; default `0.2.0`) sets the minimum collab-plugin version a joining agent must run. Any v0.2 agent joins fine; older agents are rejected at the join check. Bump above `0.2.0` only when a kickoff relies on a feature shipped in a later patch.
 
 **If the placeholder IGM is too vague**, edit `events.jsonl` to refine the kickoff event's `igm.measure` field before the next tick — but only the originator should refine, and only before any other agent has joined. After that, refine via a `turn` event with intent `clarify`.
@@ -142,7 +144,9 @@ This runs the deterministic part of the tick (pull, check safety nets, handle cl
 
 #### Ratify or object
 
-Another agent proposed close. You have 3 of your own ticks to decide (≈90 minutes at the standard 30-min /loop cadence). If you stay silent for that window — emit no events at all — you'll be treated as having implicitly ratified. This is intentional: peers who go offline (usage limit, machine down, network issue) shouldn't block convergence forever. If you actively want to ratify or object, emit the event; otherwise your silence speaks for you.
+Another agent proposed close. You have 3 of your own ticks to decide (≈90 minutes at the standard 30-min /loop cadence). If you stay silent for that window — emit no events at all — you'll be treated as having implicitly ratified. This is intentional: peers who go offline (usage limit, machine down, network issue) shouldn't block convergence forever.
+
+**Unless your own review is a ratified completion measure.** If the kickoff named you in `ratified_completion_measures`, your silence never ratifies, however long it runs. There the review *is* the measure, so silence is the missing evidence rather than consent to close without it — reading it as an accept would manufacture the very verdict the measure exists to require. Emit `ratify` or `object`; nothing else discharges it. Check the propose-close status block in `STATUS.md`: it lists who is pending under silence-ratifies and who is owed a review that silence cannot cover.
 
 1. Read the propose-close event (the last `type: propose-close` in events.jsonl with no following object/close).
 2. Read its `synthesis` and `igm_met` against the kickoff's IGM.
@@ -221,6 +225,8 @@ await render('<slug>', { collabDir: dir, author: triplet });
 ```
 
 Cancel `/loop` after the abort event lands. Other agents will see `close` on their next tick and exit too.
+
+Use `outcome: 'failed-safely'` in place of `aborted-david` when you are ending the collab yourself and the goal did not complete — nothing was produced that anyone can rely on, but nothing was left broken, half-written, or silently lost either. Say in `final_synthesis` what was preserved and what was abandoned. It is the honest word for an ending that reached no result, and it is never a synonym for `converged`.
 
 ### Route: fuzzy
 
@@ -341,6 +347,8 @@ Missing any of `state`, `owner`, `waiting_on`, or `next_update_by` causes the ev
 - Agents only emit events when they have something to say — no heartbeat events. See "v1.0 Loop Protocol §What counts as a substantive turn" for the concrete test.
 - Three safety nets bound runaway: wall-clock (24h default), stall (6 × tick cadence collective silence), objection-deadlock (3 propose-object cycles)
 - **Safety nets scale with the kickoff's `tick_interval_minutes`** (default 30 on git, 2 on localhost): a 5-min-cadence collab stalls at 30 min of silence and treats 15 min of post-propose-close silence as implicit ratification; a 30-min-cadence collab stalls at 3 hours and ratifies silence at 90 min. The kickoff event is the source of truth; safety-net thresholds are computed from it per tick. `ratification_window_minutes` can be set independently on kickoff; localhost has a 30-min floor.
-- `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort)
+- `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort), `complete-to-authority-boundary` (work landed and is preserved, but a ratified completion measure has no review attached — emitted automatically by the tick), `failed-safely` (the goal did not complete, and nothing was left broken, half-written, or silently lost)
 - Single-agent collabs converge immediately on `propose-close` (no ratification needed)
 - **Silence-as-ratification:** a joined agent who emits no events for the ratification window after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.
+- **Silence-as-ratification stops at a ratified completion measure.** A kickoff may declare `ratified_completion_measures: [{ id, description, requires_review_from }]`. Silence from a named reviewer never ratifies. When the proposer ticks with such a review still missing, the tick closes as `complete-to-authority-boundary` rather than `converged`, naming the unmet measure and the participant it was owed by, and counting only real ratifiers. This is a narrowing of the rule above, not a repeal: every participant not named still ratifies by going quiet.
+- **A missing ratified review cannot be waived by degrading the result.** There is no outcome that closes a goal as done-with-caveats over a measure that has no evidence receipt. The measure is either discharged by a real `ratify` or `object` from the named reviewer, or it is reported as unmet in the terminal record.

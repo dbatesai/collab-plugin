@@ -18,7 +18,7 @@ import {
   findCollabAcrossTransports, readEvents, generateEventId, authorSlugFromTriplet, appendEvent,
   deriveTriplet, hasJoined, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
-  getJoinedAgents,
+  getJoinedAgents, unmetRequiredReviews,
   gitPullRebase, gitCommitPush,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
@@ -55,6 +55,12 @@ export function detectRoute(events, triplet, nowTs) {
   // Treat objected propose-closes as dead (findActiveProposeClose semantics).
   // The ratStatus still reports them for visibility, but tick routing skips them.
   if (ratStatus && ratStatus.objected.length === 0) {
+    // A ratified completion measure with no review attached cannot be closed as success
+    // and cannot be waived by declaring the result degraded. The proposer closes at the
+    // authority boundary instead, naming what never arrived.
+    if (ratStatus.proposeClose.author === triplet && unmetRequiredReviews(events, nowTs).length > 0) {
+      return 'terminal:authority-boundary';
+    }
     if (ratStatus.converged && ratStatus.proposeClose.author === triplet) return 'emit-close';
     if (ratStatus.proposeClose.author !== triplet && ratStatus.pending.includes(triplet)) return 'ratify-or-object';
   }
@@ -117,6 +123,37 @@ export async function tickDeterministic(slug, options = {}) {
       if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${outcomes[net]})`);
     }
     return { action: 'close', reason: net, event: ev };
+  }
+
+  if (route === 'terminal:authority-boundary') {
+    const rat = getRatificationStatus(events, nowTs);
+    const unmet = unmetRequiredReviews(events, nowTs);
+    const ev = {
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug,
+      type: 'close', references: [rat.proposeClose.event_id],
+      payload: {
+        final_synthesis: rat.proposeClose.payload.synthesis,
+        outcome: 'complete-to-authority-boundary',
+        // What did not arrive, named. A terminal record that does not say this is just
+        // a different word for the same silence.
+        unmet_ratified_measures: unmet,
+        missing_reviews_from: unmet.map(m => m.requires_review_from),
+        // Only real verdicts. Nothing here is inferred from silence.
+        ratified_by: rat.explicitRatified,
+        note: 'Closed at the authority boundary. Every ratified completion measure that has an '
+            + 'evidence receipt is included above; the reviews named in unmet_ratified_measures '
+            + 'never arrived and were not waived. This is not a consensus and must not be '
+            + 'described as one.',
+      },
+    };
+    if (!dryRun) {
+      appendEvent(dir, ev);
+      await render(slug, { collabDir: dir, author: triplet });
+      if (isGitTransport(transport)) {
+        gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (complete-to-authority-boundary)`);
+      }
+    }
+    return { action: 'close', reason: 'authority-boundary', event: ev };
   }
 
   if (route === 'emit-close') {

@@ -50,10 +50,17 @@ export function buildStatusMd(events, slug) {
   lines.push('');
 
   if (proposeClose && ratStatus) {
+    const required = new Set(ratStatus.requiredReviewers || []);
+    const silenceRatifies = ratStatus.pending.filter(a => !required.has(a));
+    const owedReviews = ratStatus.pending.filter(a => required.has(a));
     lines.push('## Propose-close status',
       `Proposed by: ${proposeClose.author}`,
       `Ratified: ${ratStatus.ratified.join(', ') || 'none'}`,
-      `Pending (silence = ratify): ${ratStatus.pending.join(', ') || 'none'}`, '');
+      `Pending (silence = ratify): ${silenceRatifies.join(', ') || 'none'}`);
+    if (owedReviews.length) {
+      lines.push(`Owed — silence does NOT ratify (their review is a ratified measure): ${owedReviews.join(', ')}`);
+    }
+    lines.push('');
   }
 
   const now = new Date().toISOString();

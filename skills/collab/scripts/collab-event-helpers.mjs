@@ -619,6 +619,49 @@ export function checkSafetyNets(events, nowTs) {
   return null;
 }
 
+/**
+ * Participants whose own review is itself a ratified completion measure, declared on
+ * the kickoff as `payload.ratified_completion_measures`.
+ *
+ * For these participants silence is the missing evidence, not consent, so it is never
+ * converted into ratification. This is a NARROWING of silence-as-ratification, not a
+ * repeal: every participant not named here still ratifies by going quiet, so an
+ * offline peer can never wedge convergence forever.
+ *
+ * @returns {string[]} participant triplets, deduplicated
+ */
+export function requiredReviewers(events) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const measures = kickoff?.payload?.ratified_completion_measures;
+  if (!Array.isArray(measures)) return [];
+  return [...new Set(
+    measures.map(m => m?.requires_review_from).filter(t => typeof t === 'string' && t !== ''),
+  )];
+}
+
+/**
+ * Declared measures whose review has not arrived for the propose-close currently on
+ * the table. A measure is discharged by an explicit `ratify` OR an explicit `object`
+ * from the named reviewer after that propose-close — the measure is *a review*, not
+ * an accept, and an objection is a delivered review with a negative verdict.
+ *
+ * Scoping to the active propose-close is deliberate: a verdict on an earlier synthesis
+ * is not a verdict on this one. A reviewer who never joined, or who withdrew, or who is
+ * the proposer themselves, leaves the measure unmet — every one of those is a review
+ * that did not happen, and none of them may become a waiver.
+ *
+ * @returns {Array<object>} the unmet measures, verbatim from the kickoff
+ */
+export function unmetRequiredReviews(events, nowTs) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const measures = kickoff?.payload?.ratified_completion_measures;
+  if (!Array.isArray(measures) || measures.length === 0) return [];
+  const status = getRatificationStatus(events, nowTs);
+  if (!status) return measures.filter(m => m?.requires_review_from);
+  const delivered = new Set([...status.explicitRatified, ...status.objected]);
+  return measures.filter(m => m?.requires_review_from && !delivered.has(m.requires_review_from));
+}
+
 export function getRatificationStatus(events, nowTs) {
   // Find the latest propose-close (not nullified by a subsequent object — that's
   // findActiveProposeClose's job; here we still want to report ratification state
@@ -646,10 +689,16 @@ export function getRatificationStatus(events, nowTs) {
   const silenceRatifyMs = getRatificationWindowMs(events);
   const eligibleForSilenceRatify = silenceElapsed > silenceRatifyMs;
 
+  // ...except from a participant whose own review is a ratified completion measure.
+  // There, silence IS the missing evidence, so reading it as consent would synthesize
+  // the very accept the measure exists to require.
+  const required = new Set(requiredReviewers(events));
+
   const implicitRatified = new Set();
   if (eligibleForSilenceRatify) {
     for (const agent of others) {
       if (explicitRatified.has(agent) || objected.has(agent)) continue;
+      if (required.has(agent)) continue;
       // Has this agent emitted ANY event since propose-close?
       const agentEventsSince = after.some(e => e.author === agent);
       if (!agentEventsSince) implicitRatified.add(agent);
@@ -666,6 +715,7 @@ export function getRatificationStatus(events, nowTs) {
     implicitRatified: [...implicitRatified],
     objected: [...objected],
     pending,
+    requiredReviewers: [...required],
     converged: pending.length === 0 && objected.size === 0,
   };
 }

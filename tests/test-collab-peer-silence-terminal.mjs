@@ -34,9 +34,14 @@ import {
   appendEvent, readEvents,
   getRatificationStatus, evaluateObligations, executeTimeoutAction, checkSafetyNets,
   CHASE_FLOOD_LIMIT,
-} from '../../skills/collab/scripts/collab-event-helpers.mjs';
-import { detectRoute, tickDeterministic } from '../../skills/collab/scripts/collab-tick.mjs';
-import { validateEvents } from '../../skills/collab/scripts/collab-validate.mjs';
+} from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { detectRoute, tickDeterministic } from '../skills/collab/scripts/collab-tick.mjs';
+import { validateEvents } from '../skills/collab/scripts/collab-validate.mjs';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+// Participant identity is minted to disk on first use. Bind it to a throwaway root for
+// this test process so a run never mints — or pins — an identity in the real ~/.collab.
+process.env.COLLAB_STATE_ROOT = mkdtempSync(join(tmpdir(), 'collab-state-'));
 
 const ME = 'core-framework@claude-code:host';   // canonical writer / proposer
 const PEER_A = 'core-codex@codex:host';         // delivers, reviews, ratifies

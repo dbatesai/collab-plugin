@@ -12,7 +12,12 @@ import { findCollabDir, readEvents } from './collab-event-helpers.mjs';
 const VALID_TYPES = ['kickoff','join','decline','turn','propose-close','ratify','object','withdraw','close',
                      'reconciled','quarantined','timeout-action'];
 const VALID_INTENTS = ['propose','critique','probe','synthesize','clarify'];
-const VALID_OUTCOMES = ['converged','aborted-stall','aborted-budget','aborted-objection','aborted-david'];
+// `converged` and the `aborted-*` family, then the two honest terminal modes for a goal
+// that ran the ladder out: `complete-to-authority-boundary` (work landed, but a ratified
+// completion measure has no review attached) and `failed-safely` (the goal did not
+// complete, and nothing was left broken or half-written).
+const VALID_OUTCOMES = ['converged','aborted-stall','aborted-budget','aborted-objection','aborted-david',
+                        'complete-to-authority-boundary','failed-safely'];
 const TRANSPORT_RE = /^(localhost|github:[a-z0-9_-]+)$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const REQUIRED_PAYLOAD = {
@@ -64,6 +69,26 @@ export function validateEvents(events) {
         const r = e.payload.ratification_window_minutes;
         if (typeof r !== 'number' || !Number.isFinite(r) || r < 1 || r > 1440) {
           errors.push(`${tag} kickoff ratification_window_minutes must be a number between 1 and 1440 (got: ${JSON.stringify(r)})`);
+        }
+      }
+      if ('ratified_completion_measures' in (e.payload || {})) {
+        const ms = e.payload.ratified_completion_measures;
+        if (!Array.isArray(ms)) {
+          errors.push(`${tag} kickoff ratified_completion_measures must be an array (got: ${JSON.stringify(ms)})`);
+        } else {
+          ms.forEach((m, j) => {
+            const at = `${tag} ratified_completion_measures[${j}]`;
+            if (typeof m !== 'object' || m === null) {
+              errors.push(`${at} must be an object with id + requires_review_from`);
+              return;
+            }
+            if (typeof m.id !== 'string' || m.id === '')
+              errors.push(`${at} missing a non-empty string id`);
+            // The whole point of the field is naming WHO owes the review. A measure that
+            // names no reviewer cannot be discharged and cannot be reported as missing.
+            if (typeof m.requires_review_from !== 'string' || m.requires_review_from === '')
+              errors.push(`${at} missing a non-empty requires_review_from participant triplet`);
+          });
         }
       }
       if ('min_collab_plugin_version' in (e.payload || {})) {

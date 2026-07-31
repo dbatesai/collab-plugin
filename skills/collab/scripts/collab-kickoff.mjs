@@ -6,6 +6,7 @@
  * CLI: node collab-kickoff.mjs "<message>" --workspace-id <id> [--dry-run]
  *      [--transport <id>] [--tick-interval-minutes <n>] [--pin <6-digits>]
  *      [--ratification-window-minutes <n>] [--min-version <semver>]
+ *      [--required-review <participant-triplet>]   (repeatable)
  */
 import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,6 +28,13 @@ export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockH
   if (typeof opts.transport === 'string') payload.transport = opts.transport;
   if (typeof opts.ratificationWindowMinutes === 'number') payload.ratification_window_minutes = opts.ratificationWindowMinutes;
   if (typeof opts.minCollabPluginVersion === 'string') payload.min_collab_plugin_version = opts.minCollabPluginVersion;
+  if (Array.isArray(opts.requiredReviews) && opts.requiredReviews.length) {
+    payload.ratified_completion_measures = opts.requiredReviews.map(t => ({
+      id: `independent-review-${authorSlugFromTriplet(t)}`,
+      description: `independent review by ${t}`,
+      requires_review_from: t,
+    }));
+  }
   return payload;
 }
 
@@ -63,6 +71,7 @@ export async function kickoff(message, options = {}) {
     transport = 'github:files',
     ratificationWindowMinutes,
     minCollabPluginVersion = '0.2.0',
+    requiredReviews = [],
   } = options;
 
   if (!parseTransport(transport)) throw new Error(`invalid transport: ${transport}`);
@@ -110,6 +119,7 @@ export async function kickoff(message, options = {}) {
       transport,
       ratificationWindowMinutes: ratMin,
       minCollabPluginVersion,
+      requiredReviews,
     }),
   };
   appendEvent(collabDir, kickoffEvt);
@@ -144,6 +154,7 @@ export async function kickoff(message, options = {}) {
 export function main(argv) {
   let message = null, workspaceId = null, dryRun = false;
   let tickIntervalMinutes, pin, transport, ratificationWindowMinutes, minCollabPluginVersion;
+  const requiredReviews = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
     else if (argv[i] === '--dry-run') dryRun = true;
@@ -163,6 +174,14 @@ export function main(argv) {
         return 2;
       }
       ratificationWindowMinutes = n;
+    }
+    else if (argv[i] === '--required-review') {
+      const t = argv[++i];
+      if (!t || t.startsWith('--')) {
+        process.stderr.write('--required-review needs a participant triplet like core-gemini@antigravity:host\n');
+        return 2;
+      }
+      requiredReviews.push(t);
     }
     else if (argv[i] === '--min-version') {
       minCollabPluginVersion = argv[++i];
@@ -186,7 +205,7 @@ export function main(argv) {
   }
   kickoff(message, {
     workspaceId, dryRun, tickIntervalMinutes, pin,
-    transport, ratificationWindowMinutes, minCollabPluginVersion,
+    transport, ratificationWindowMinutes, minCollabPluginVersion, requiredReviews,
   })
     .then(r => {
       process.stdout.write(

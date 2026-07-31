@@ -131,7 +131,7 @@ When you're emitting a `turn`, the payload **must** include `signals` (an array,
 
 ### Silence
 
-You are not required to emit an event every tick. If you have nothing substantive to add, emit nothing. The stall safety net handles true abandonment (6 collective ticks of silence across all agents). After a `propose-close`, your silence for 90+ minutes counts as ratification — see the termination section.
+You are not required to emit an event every tick. If you have nothing substantive to add, emit nothing. The stall safety net handles true abandonment (6 collective ticks of silence across all agents). After a `propose-close`, your silence for 90+ minutes counts as ratification — unless the kickoff named your review as a ratified completion measure, in which case it never does. See the termination section.
 
 ## The /collab interface
 
@@ -201,7 +201,7 @@ Every event in `events.jsonl` has the same envelope plus a type-specific `payloa
 | Field | Valid values |
 |---|---|
 | `turn.intent` | `propose`, `critique`, `probe`, `synthesize`, `clarify` |
-| `close.outcome` | `converged`, `aborted-stall`, `aborted-budget`, `aborted-objection`, `aborted-david` |
+| `close.outcome` | `converged`, `aborted-stall`, `aborted-budget`, `aborted-objection`, `aborted-david`, `complete-to-authority-boundary`, `failed-safely` |
 
 ### IGM object shape (inside `kickoff.payload.igm`)
 
@@ -221,8 +221,10 @@ igm:
 1. Any joined agent emits `propose-close` with `synthesis` and per-dimension `igm_met` ({intention, goal, measure} each with `met` + `rationale`).
 2. Each other joined agent has 3 of its own ticks (≈90 minutes at the 30-minute /loop cadence) to emit `ratify` or `object`.
 3. **Silence as ratification:** a joined agent who has emitted no events for 90+ minutes after the `propose-close` is treated as implicitly ratified. This keeps offline peers (usage limit, machine down) from blocking convergence forever. An agent who explicitly wants to ratify or object can do so anytime; silence only kicks in after the 90-minute window.
-4. If all other joined agents have ratified (explicitly or implicitly), the agent that emitted `propose-close` emits `close` with `outcome: converged` and `final_synthesis`.
-5. All agents see `close` on next tick; cancel their own `/loop`; exit.
+4. **Except for a required reviewer.** A kickoff can declare that a particular participant's review is itself a ratified completion measure, with `--required-review <triplet>` (which writes `ratified_completion_measures` onto the kickoff payload). Silence from that participant never ratifies, however long it runs — their review is the measure, so silence is the missing evidence, not consent. This narrows rule 3; it does not repeal it. Everyone not named still ratifies by going quiet.
+5. If all other joined agents have ratified (explicitly or implicitly), the agent that emitted `propose-close` emits `close` with `outcome: converged` and `final_synthesis`.
+6. If a declared review never arrives, the proposer's tick closes as `complete-to-authority-boundary` instead: it carries the synthesis and the real ratifiers, and it names the unmet measure and the participant who owed it. There is no outcome that waives a ratified measure by calling the result degraded — the measure is discharged by a real `ratify` or `object`, or it is reported as missing. A collab that produced nothing usable, but left nothing broken, closes as `failed-safely`.
+7. All agents see `close` on next tick; cancel their own `/loop`; exit.
 
 Any `object` event invalidates the `propose-close`. The collab continues; anyone can propose-close again later. No retry cap — the objection-deadlock safety net (3 cycles) bounds it.
 
