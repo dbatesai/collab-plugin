@@ -8,7 +8,7 @@
       "name": "collab",
       "source": {
         "source": "local",
-        "path": "./plugins/collab"
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",
