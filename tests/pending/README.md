@@ -11,6 +11,14 @@ Each one was proven to discriminate before landing here: red against the shipped
 against a minimal reference implementation, and red again under mutations of that
 implementation. A test that has only ever been red proves nothing either.
 
+**A red test only means something if it is red for the reason it claims.** The first commit
+into this directory got that wrong: two files landed with imports one level short, so both
+died on `ERR_MODULE_NOT_FOUND` before a single assertion ran — inside the same commit whose
+README said exactly that must not happen. Nobody read the failure; the summary line said
+"fail" and that matched what was expected. A sibling agent running them caught it.
+`tests/test-pending-tests-fail-honestly.mjs` now runs every file here on each CI pass and
+fails the build if any of them passes, or fails on anything other than an assertion.
+
 ## test-collab-peer-silence-terminal.mjs — failure class 18
 
 A goal blocked on a review that is itself a ratified completion measure must terminate as
@@ -33,6 +41,28 @@ an offline peer from wedging convergence forever. The fix is a narrowing — req
 only — not a repeal. One test in the file is a control that fails loudly if someone
 implements "silence never ratifies" and strands every offline peer instead. Prose in
 `SKILL.md` and the README teaches the current behavior and changes with the code.
+
+## test-collab-recovery-election.mjs — failure class 13
+
+Simultaneous recovery attempts must not elect two writers.
+
+All seven assertions are red, and the defect was reproduced before the test was written: two
+barriered processes both ran recovery on one broken lane, both imported the orphan, and both
+wrote a `reconciled` receipt. Two writers, no error, no claim artifact on disk.
+
+There is no recovery election. `acquireRepoClaim` is the only mutual-exclusion primitive and
+it guards git operations only — `reconcileForeignSurface`, which is the actual recovery path
+and does mutate reconciliation state, runs under no claim at all. On a `localhost` channel
+there is no claim in play whatsoever.
+
+Ten consecutive runs against a reference implementation: green 10/10. Ten against a
+check-then-write mutation of that implementation: green 0/10, with the contention case
+catching it every time. No flake in either direction.
+
+**The decision this waits on:** the function names are invented (`acquireRecoveryClaim` and
+family, matching the existing `acquireRepoClaim` shape) because the design specifies a
+mechanism, not an API. An implementer who picks different names should rename in the test
+rather than weaken it.
 
 ## test-collab-harness-identity.mjs — failure class 11
 

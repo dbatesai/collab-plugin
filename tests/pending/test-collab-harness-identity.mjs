@@ -61,9 +61,9 @@ function clearHarnessEnv() {
 async function freshModules(tag) {
   const q = `?fixture=${encodeURIComponent(tag)}`;
   const [kickoffMod, helpers, tick] = await Promise.all([
-    import(`../skills/collab/scripts/collab-kickoff.mjs${q}`),
-    import(`../skills/collab/scripts/collab-event-helpers.mjs${q}`),
-    import(`../skills/collab/scripts/collab-tick.mjs${q}`),
+    import(`../../skills/collab/scripts/collab-kickoff.mjs${q}`),
+    import(`../../skills/collab/scripts/collab-event-helpers.mjs${q}`),
+    import(`../../skills/collab/scripts/collab-tick.mjs${q}`),
   ]);
   return { kickoff: kickoffMod.kickoff, ...helpers, tickDeterministic: tick.tickDeterministic };
 }
