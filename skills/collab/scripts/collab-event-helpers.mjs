@@ -791,9 +791,13 @@ export function acquireRepoClaim(repo, owner, now = Date.now()) {
   if (existsSync(claimPath)) {
     let held = null;
     try { held = JSON.parse(readFileSync(claimPath, 'utf8')); } catch { /* corrupt → reclaimable */ }
-    const age = now - statSync(claimPath).mtimeMs;
-    if (age < REPO_CLAIM_TTL_MS) return null;      // live owner
-    generation = (held?.generation ?? 0) + 1;       // expired lease → reclaim
+    // The holder can release between the check above and this stat — that is a
+    // holder doing its job, not an error. A vanished claim means nobody holds it,
+    // so fall through to the link, which is what actually decides the winner.
+    let age = null;
+    try { age = now - statSync(claimPath).mtimeMs; } catch { /* released → reclaimable */ }
+    if (age !== null && age < REPO_CLAIM_TTL_MS) return null;   // live owner
+    generation = (held?.generation ?? 0) + 1;       // expired or gone → reclaim
     try { unlinkSync(claimPath); } catch { /* raced; the link below decides */ }
   }
 
