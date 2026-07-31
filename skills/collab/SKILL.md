@@ -212,6 +212,20 @@ node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-status.mjs <slug>
 
 Pure terminal display. No event emitted.
 
+When the user doesn't name a slug (or asks "what collabs are running?"), enumerate channels across all transports first:
+
+```bash
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-list.mjs [localhost|github:<repo>] [--closed | --all]
+```
+
+When a channel looks corrupt or a peer's events aren't landing, run the schema check before debugging by hand — it reports every malformed event with its line number:
+
+```bash
+node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-validate.mjs <slug>
+```
+
+Both are read-only. No event emitted.
+
 ### Route: abort
 
 Emit a close event with `outcome: 'aborted-david'`:

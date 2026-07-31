@@ -41,3 +41,11 @@ test('SKILL.md mentions the 5 routes', () => {
     assert.ok(SKILL.includes(route), `SKILL.md should mention route "${route}"`);
   }
 });
+
+test('SKILL.md gives every shipped read-only CLI a door', () => {
+  // A script with no door in SKILL.md is unreachable from the skill: the model
+  // never learns it exists.
+  for (const script of ['collab-list.mjs', 'collab-validate.mjs']) {
+    assert.ok(SKILL.includes(script), `SKILL.md should reference ${script}`);
+  }
+});
