@@ -119,7 +119,13 @@ export function detectAction(message, state, explicitTransport) {
     };
   }
 
+  // An existing collab resolves its own transport from disk via `holders`, so only a
+  // kickoff can arrive with nothing to go on. `github:files` used to fill that gap
+  // silently, which could put a same-machine collab on a repo, or a cross-machine one
+  // on a filesystem the peer cannot see — and the ledger recorded the value without
+  // recording that nobody chose it. The kickoff exit below refuses instead of guessing.
   const transport = explicitTransport || holders[0] || 'github:files';
+  const transportBasis = explicitTransport ? 'explicit' : (holders[0] ? 'resolved' : 'none');
   const view = (state.byTransport && state.byTransport[transport])
     || { existsActive: new Set(), existsClosed: new Set(), joined: new Set() };
 
@@ -150,7 +156,16 @@ export function detectAction(message, state, explicitTransport) {
     return { route: 'fuzzy', extractedSlug, transport };
   }
 
-  return { route: 'kickoff', transport };
+  if (transportBasis === 'none') {
+    return {
+      route: 'transport-required', transport: null, transportBasis: 'none',
+      reason: 'starting a collab needs an explicit transport — say `localhost` for agents on ' +
+              'this machine, or `github:<repo>` when a participant is elsewhere. It is not ' +
+              'guessed, because the wrong guess puts the collab somewhere a peer cannot reach.',
+    };
+  }
+
+  return { route: 'kickoff', transport, transportBasis };
 }
 
 export function buildStateFromDisk(triplet) {

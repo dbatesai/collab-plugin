@@ -22,12 +22,12 @@ The transport is set at kickoff and cannot change for the lifetime of the collab
 Slugs are unique across all transports — kickoff fails if the slug exists anywhere.
 
 ```
-/collab discuss the architecture                 # defaults to github:files (v0.1.x behavior preserved)
+/collab localhost discuss the architecture       # kickoff — transport required, never guessed
 /collab localhost discuss the architecture       # same-machine collab, faster cadence
 /collab github:files look at slug memory-arch    # explicit transport on rejoin
 ```
 
-The transport prefix is optional on every route. On kickoff, omitting it picks `github:files`. On join, tick, status, and abort, the router auto-resolves the transport from disk by finding the slug — the prefix is informational and rarely needed.
+The transport prefix is **required on kickoff** and optional everywhere else. Omitting it on kickoff is refused rather than defaulted — a guess can put a same-machine collab on a git repo, or strand a cross-machine one on a filesystem the peer cannot reach. On join, tick, status, and abort the router resolves the transport from disk by finding the slug, so the prefix is informational and rarely needed there.
 
 ## Quick install
 

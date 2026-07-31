@@ -23,7 +23,11 @@ node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "<message>" --
 
 Output is JSON: `{ route, slug?, extractedSlug?, transport, triplet }`.
 
-The route script extracts a leading transport token (`localhost` or `github:<repo>`) from the message before slug derivation. The result JSON now includes a `transport` field. If David's command includes the transport prefix (`/collab localhost discuss xyz`), the route returns that transport. If omitted, the default is `github:files` — preserves v0.1.x behavior.
+The route script extracts a leading transport token (`localhost` or `github:<repo>`) from the message before slug derivation. The result carries `transport` plus a `transportBasis` saying where it came from — `explicit` when the message named it, `resolved` when it was found on disk from the slug.
+
+**A kickoff with no transport is refused, not defaulted.** The route returns `transport-required` with `transport: null`; ask which one before starting. Guessing is not a small mistake here — it can put a same-machine collab on a git repo, or strand a cross-machine collab on a filesystem the other agent cannot see, and the ledger would record the value without recording that nobody chose it.
+
+Every other route — join, tick, status, abort — still needs no prefix, because it finds the slug on disk and reads the transport from there.
 
 - `route: "kickoff"` — no slug referenced, message describes new work
 - `route: "join"` — message references a known active slug; agent hasn't joined yet
@@ -50,8 +54,9 @@ The transport is set at kickoff and cannot change for the lifetime of the collab
 David might type either form of any route — with the transport prefix or without. The route script accepts both:
 
 ```
-/collab discuss the architecture                    # kickoff, defaults to github:files
-/collab localhost discuss the architecture          # kickoff, localhost
+/collab discuss the architecture                    # REFUSED — a kickoff will not guess a transport
+/collab localhost discuss the architecture          # kickoff on this machine
+/collab github:files discuss the architecture       # kickoff across machines
 
 /collab look at slug memory-arch                    # join (or tick), auto-resolves transport from disk
 /collab localhost look at slug memory-arch          # join (or tick), explicit transport
@@ -63,7 +68,7 @@ David might type either form of any route — with the transport prefix or witho
 /collab localhost abort slug memory-arch            # abort, explicit
 ```
 
-The prefix only matters at kickoff. On join, tick, status, and abort, the route script resolves the transport from disk by finding the slug across all known transports — so the prefix is informational and can be omitted.
+The prefix is required at kickoff and optional everywhere else. On join, tick, status, and abort the route script resolves the transport from disk by finding the slug across all known transports, so the prefix is informational there and can be omitted.
 
 ## Step 2: Execute the route
 
@@ -75,7 +80,7 @@ node ${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-kickoff.mjs "<message>" 
 
 This writes `KICKOFF.md`, an `evt-001` kickoff event with placeholder IGM, an `evt-002` self-join event, commits (on git transports), and pushes. Stdout reports the slug, the auto-generated 6-digit PIN (David's manual-entry shorthand), the transport, and the recommended `/loop` command at the chosen cadence.
 
-Pass the route's `transport` field through as `--transport`. If David's message had no transport prefix, the route returns `github:files` (v0.1.x behavior) — pass that through.
+Pass the route's `transport` field through as `--transport`. A kickoff always has one, because a message with no transport prefix never reaches this route — it is refused as `transport-required` first.
 
 `--pin <6-digits>` (optional) lets the caller supply a specific PIN instead of generating one randomly; useful for testing or when David has a preferred number to remember.
 
