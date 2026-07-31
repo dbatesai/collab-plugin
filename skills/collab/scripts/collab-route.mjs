@@ -15,7 +15,7 @@
 import { realpathSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { readEvents, isClosed, hasJoined, deriveTriplet, findCollabDir, isPinRef } from './collab-event-helpers.mjs';
+import { readEvents, isClosed, hasJoinedIdentity, resolveIdentity, findCollabDir, isPinRef } from './collab-event-helpers.mjs';
 import { localCollabsRoot, githubReposRoot } from './transport.mjs';
 
 const SLUG_PATTERNS = [
@@ -168,7 +168,14 @@ export function detectAction(message, state, explicitTransport) {
   return { route: 'kickoff', transport, transportBasis };
 }
 
-export function buildStateFromDisk(triplet) {
+/**
+ * @param {string|object} self — the participant triplet, or the identity object from
+ *        resolveIdentity(). Passing the object lets membership resolve on a channel whose
+ *        join events predate participant ids and were authored under a different harness.
+ */
+export function buildStateFromDisk(self) {
+  const identity = (typeof self === 'string') ? { triplet: self } : (self || {});
+  const triplet = identity.triplet;
   const state = { byTransport: {}, pinIndex: new Map() };
   const transportsToScan = [];
   const LOCAL_ROOT = localCollabsRoot();
@@ -191,7 +198,7 @@ export function buildStateFromDisk(triplet) {
       const events = readEvents(join(root, e.name));
       const active = !isClosed(events);
       if (active) view.existsActive.add(slug); else view.existsClosed.add(slug);
-      if (hasJoined(events, triplet)) view.joined.add(slug);
+      if (hasJoinedIdentity(events, identity)) view.joined.add(slug);
       // PIN index is flat across transports (PINs are globally unique like slugs).
       // Active collabs win on collision (vanishingly unlikely).
       const kickoff = events.find(ev => ev.type === 'kickoff');
@@ -226,8 +233,9 @@ export function main(argv) {
   }
   if (!message) { process.stderr.write('usage: collab-route.mjs "<message>" [--workspace-id <id>]\n'); return 2; }
   const { transport: explicitTransport, rest } = extractTransport(message);
-  const triplet = deriveTriplet(workspaceId);
-  const state = buildStateFromDisk(triplet);
+  const identity = resolveIdentity(workspaceId);
+  const triplet = identity.triplet;
+  const state = buildStateFromDisk(identity);
   const result = detectAction(rest, state, explicitTransport);
   if (result.route === 'join' && result.slug) {
     result.tick_interval_minutes = tickIntervalMinutesFromKickoff(result.slug);

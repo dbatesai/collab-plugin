@@ -23,6 +23,19 @@ import {
 } from './transport.mjs';
 export { detectHarness };
 
+// Participant identity is minted once and persisted (collab-identity.mjs). Re-exported here
+// because every emit path already imports its identity from this module.
+import {
+  resolveIdentity, findAdmittedIdentity, parseTriplet, identityKeyFromTriplet, deriveMachine,
+} from './collab-identity.mjs';
+export {
+  resolveIdentity, findAdmittedIdentity, parseTriplet, identityKeyFromTriplet, deriveMachine,
+};
+export {
+  composeTriplet, mintParticipantId, identityRoot, identityRecordPath,
+  readIdentityRecord, writeIdentityRecord,
+} from './collab-identity.mjs';
+
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
 export const COLLABS_DIR = join(FILES_REPO, 'collabs');
 export const TICK_INTERVAL_MS = 30 * 60 * 1000; // default 30 min; per-collab override via kickoff payload's tick_interval_minutes
@@ -105,13 +118,18 @@ export function generateEventId(tsIso, authorSlug) {
 
 // --- Triplet ---
 
+// The participant's display name for a workspace. Minted once, then read from the identity
+// store on every later call — it does NOT re-sniff the environment. Losing the harness env
+// var now degrades the advisory `harness` field on new events and leaves this string alone.
 export function deriveTriplet(workspaceId) {
-  // `hostname -s` is unsupported on Windows; fall back to no-args form which
-  // works cross-platform and returns the short hostname on all three OSes.
-  let r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
-  if (r.error || r.status !== 0) r = spawnSync('hostname', [], { encoding: 'utf8' });
-  const machine = (r.stdout || '').trim().split('.')[0] || 'unknown';
-  return `${workspaceId}@${detectHarness()}:${machine}`;
+  return resolveIdentity(workspaceId).triplet;
+}
+
+// The identity to author events under inside one specific channel. Same as deriveTriplet
+// except the channel's own ledger gets the first word, which is what keeps a pre-identity
+// channel — join events with no participant_id — resolving after an upgrade.
+export function channelIdentity(events, workspaceId) {
+  return resolveIdentity(workspaceId, { events });
 }
 
 export function authorSlugFromTriplet(triplet) {
@@ -560,7 +578,29 @@ export function getJoinedAgents(events) {
 }
 
 export function isClosed(events) { return events.some(e => e.type === 'close'); }
-export function hasJoined(events, triplet) { return events.some(e => e.type === 'join' && e.author === triplet); }
+
+// Exact membership. `participantId` is optional and matches the persisted id carried on
+// events emitted since identity became a minted value — a participant whose display triplet
+// was edited by hand still resolves through it.
+export function hasJoined(events, triplet, participantId) {
+  return events.some(e => e.type === 'join'
+    && (e.author === triplet || (participantId != null && e.participant_id === participantId)));
+}
+
+// Membership including the compatibility read for channels joined before participant ids
+// existed: same workspace, same machine, harness ignored, and only when unambiguous.
+export function hasJoinedIdentity(events, identity) {
+  if (!identity) return false;
+  if (hasJoined(events, identity.triplet, identity.participant_id)) return true;
+  const machine = identity.machine || parseTriplet(identity.triplet)?.machine;
+  const workspaceId = identity.workspace_id || parseTriplet(identity.triplet)?.workspaceId;
+  if (!machine || !workspaceId) return false;
+  return findAdmittedIdentity(events, {
+    workspaceId, machine,
+    participantId: identity.participant_id, triplet: identity.triplet,
+  }) != null;
+}
+
 export function hasDeclined(events, triplet) { return events.some(e => e.type === 'decline' && e.author === triplet); }
 
 export function findActiveProposeClose(events) {

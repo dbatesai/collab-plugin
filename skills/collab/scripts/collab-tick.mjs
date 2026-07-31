@@ -16,7 +16,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   findCollabAcrossTransports, readEvents, generateEventId, authorSlugFromTriplet, appendEvent,
-  deriveTriplet, hasJoined, isClosed,
+  channelIdentity, hasJoinedIdentity, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
   getJoinedAgents, unmetRequiredReviews,
   gitPullRebase, gitCommitPush,
@@ -84,13 +84,24 @@ export async function tickDeterministic(slug, options = {}) {
   // Resolve identity first: quarantine needs an author so it can emit a ROUTED notice.
   // Without one it would preserve the bytes and announce nothing, leaving a suppressed
   // peer event visible only to whoever inspects the directory by hand.
-  const triplet = givenTriplet || deriveTriplet(workspaceId);
+  //
+  // The ledger is read before identity resolves, because the identity this channel already
+  // admitted outranks anything this machine would mint — that is what lets a channel whose
+  // join events predate participant ids keep resolving.
+  const identity = givenTriplet
+    ? { triplet: givenTriplet, participant_id: null, harness: detectHarness() }
+    : channelIdentity(readEvents(dir), workspaceId);
+  const triplet = identity.triplet;
   if (!dryRun) quarantineInvalidV1Events(dir, { author: triplet });
   const events = readEvents(dir);
   const transport = transportFromEvents(events);
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
 
-  if (!hasJoined(events, triplet)) {
+  // Advisory metadata stamped on everything this tick emits. Free to degrade; nothing
+  // downstream routes on it.
+  const stamp = { participant_id: identity.participant_id, harness: identity.harness };
+
+  if (!hasJoinedIdentity(events, identity)) {
     // v0.2 version check: if kickoff specifies a min_collab_plugin_version, enforce it
     const kickoff = events.find(e => e.type === 'kickoff');
     const minVersion = kickoff?.payload?.min_collab_plugin_version;
@@ -114,7 +125,7 @@ export async function tickDeterministic(slug, options = {}) {
     const net = route.split(':')[1];
     const outcomes = { 'wall-clock':'aborted-budget', 'stall':'aborted-stall', 'objection-deadlock':'aborted-objection' };
     const ev = {
-      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, type: 'close', references: [],
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp, type: 'close', references: [],
       payload: { final_synthesis: `Safety net: ${net}`, outcome: outcomes[net] },
     };
     if (!dryRun) {
@@ -129,7 +140,7 @@ export async function tickDeterministic(slug, options = {}) {
     const rat = getRatificationStatus(events, nowTs);
     const unmet = unmetRequiredReviews(events, nowTs);
     const ev = {
-      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug,
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp,
       type: 'close', references: [rat.proposeClose.event_id],
       payload: {
         final_synthesis: rat.proposeClose.payload.synthesis,
@@ -159,7 +170,7 @@ export async function tickDeterministic(slug, options = {}) {
   if (route === 'emit-close') {
     const rat = getRatificationStatus(events, nowTs);
     const ev = {
-      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, type: 'close',
+      event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp, type: 'close',
       references: [rat.proposeClose.event_id],
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: 'converged' },
     };
@@ -206,7 +217,7 @@ export async function tickDeterministic(slug, options = {}) {
       const harness = detectHarness();
       const chaseEv = {
         event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)),
-        ts: nowTs, author: triplet, slug,
+        ts: nowTs, author: triplet, slug, ...stamp,
         type: 'turn', references: [last.event_id],
         payload: {
           schema_version: '1.0',

@@ -100,7 +100,11 @@ node ${CODEX_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "..."
 node ${GEMINI_PLUGIN_ROOT}/skills/collab/scripts/collab-route.mjs "..."
 ```
 
-`collab-event-helpers.mjs` exports a `detectHarness()` helper that uses these env vars to determine the harness for triplet derivation.
+`collab-event-helpers.mjs` exports a `detectHarness()` helper that reads these env vars. What it returns is advisory: it is recorded beside a participant on each event as `harness`, and it is free to change or go missing.
+
+Who a participant *is* does not come from there. A participant is minted once — a `participant_id`, plus the display triplet `workspace@harness:machine` frozen at that moment — and the record is kept at `~/.collab/identity/<workspace-id>.json`. Every later call reads the record instead of asking the environment again, so losing a harness env var degrades a label and nothing else.
+
+Channels created before participant ids existed keep working. When their events are in hand, the identity a channel already admitted outranks anything this machine would mint: a join is matched on `participant_id`, then on the exact author string, and finally on the same workspace and the same machine with the harness ignored. That last read is deliberately narrow — the machine component still has to match exactly, and if two candidate authors are equally plausible nothing is adopted.
 
 ### The lifecycle, as a joiner
 

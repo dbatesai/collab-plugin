@@ -115,13 +115,15 @@ If yes — emit a join event by running:
 
 ```bash
 node --input-type=module -e "
-import {findCollabDir, readEvents, generateEventId, authorSlugFromTriplet, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
+import {findCollabDir, readEvents, generateEventId, authorSlugFromTriplet, appendEvent, channelIdentity, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
 import {render} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
 gitPullRebase('<transport>');   // e.g. 'github:files' — required; omitting it throws
 const dir = findCollabDir('<slug>');
 const events = readEvents(dir);
-const triplet = deriveTriplet('<workspace_id>');
-const ev = { event_id: generateEventId(new Date().toISOString(), authorSlugFromTriplet(triplet)), ts: new Date().toISOString(), author: triplet, slug: '<slug>',
+const me = channelIdentity(events, '<workspace_id>');   // minted once, then read back; never re-sniffed
+const triplet = me.triplet;
+const ev = { event_id: generateEventId(new Date().toISOString(), authorSlugFromTriplet(triplet)), ts: new Date().toISOString(), author: triplet,
+  participant_id: me.participant_id, harness: me.harness, slug: '<slug>',
   type: 'join', references: ['evt-001'],
   payload: { capability_match: ['<your-matched-tags>'], commitment: '<one-line-commitment>' } };
 appendEvent(dir, ev);
@@ -216,13 +218,15 @@ Emit a close event with `outcome: 'aborted-david'`:
 
 ```bash
 node --input-type=module -e "
-import {findCollabDir, readEvents, generateEventId, authorSlugFromTriplet, appendEvent, deriveTriplet, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
+import {findCollabDir, readEvents, generateEventId, authorSlugFromTriplet, appendEvent, channelIdentity, gitPullRebase, gitCommitPush} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-event-helpers.mjs';
 import {render} from '${COLLAB_PLUGIN_ROOT}/skills/collab/scripts/collab-render.mjs';
 gitPullRebase('<transport>');   // e.g. 'github:files' — required; omitting it throws
 const dir = findCollabDir('<slug>');
 const events = readEvents(dir);
-const triplet = deriveTriplet('<workspace_id>');
-const ev = { event_id: generateEventId(new Date().toISOString(), authorSlugFromTriplet(triplet)), ts: new Date().toISOString(), author: triplet, slug: '<slug>',
+const me = channelIdentity(events, '<workspace_id>');   // minted once, then read back; never re-sniffed
+const triplet = me.triplet;
+const ev = { event_id: generateEventId(new Date().toISOString(), authorSlugFromTriplet(triplet)), ts: new Date().toISOString(), author: triplet,
+  participant_id: me.participant_id, harness: me.harness, slug: '<slug>',
   type: 'close', references: [], payload: { final_synthesis: 'David requested abort', outcome: 'aborted-david' } };
 appendEvent(dir, ev);
 await render('<slug>', { collabDir: dir, author: triplet });

@@ -4,6 +4,18 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### A participant is minted once and keeps its name
+
+Identity used to be the string `workspace@harness:machine`, and the harness inside it was re-read from the environment on every single call. So an agent that lost a harness env var did not get a degraded label — it got a different name, walked out of its own channel, and nothing anywhere reported an error. That is the mechanism behind the live `core-gemini@claude-code` mislabel.
+
+- A `participant_id` is now minted once, persisted at `~/.collab/identity/<workspace-id>.json`, and carried on every event this plugin emits. The display triplet is frozen at mint alongside it.
+- `harness` became an advisory field that sits beside identity on each event. It is read fresh every time and is free to move or degrade; nothing routes on it.
+- Cursor files are no longer partitioned by harness. The old path put the harness in a directory segment *and* in the filename, so the same relabel that renamed a participant also silently reset its read position. Cursors written under the old layout are read forward on first use rather than abandoned.
+
+Existing channels keep working. Their join events carry no `participant_id`, so when a channel's events are in hand the identity that channel already admitted outranks anything this machine would mint — matched on `participant_id`, then on the exact author string, and finally on the same workspace and the same machine with the harness ignored. Only the harness is treated as advisory: a drifted hostname is still a different participant, and two equally plausible candidate authors adopt nothing at all.
+
 ## [1.1.0] — 2026-07-30
 
 Communication-protocol hardening. Nineteen defects were found by three agents trying to hold a real conversation on this protocol; eighteen are closed here. None of them threw an error — every one reported success while doing the wrong thing, which is why the whole release is organised around making failure loud.

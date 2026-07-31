@@ -19,7 +19,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   findCollabAcrossTransports, readEvents, getJoinedAgents,
-  isClosed, findActiveProposeClose, checkSafetyNets, deriveTriplet,
+  isClosed, findActiveProposeClose, checkSafetyNets, channelIdentity,
 } from './collab-event-helpers.mjs';
 import {
   cursorFilePath, readCursorState, writeCursorState,
@@ -151,7 +151,8 @@ export async function main(argv) {
   }
   if (!hit) { process.stderr.write(`no collab: ${slug}\n`); return 2; }
   const events = readEvents(hit.dir);
-  const triplet = deriveTriplet(workspaceId || 'unknown');
+  // The channel's own ledger gets first say, so a pre-identity channel keeps resolving.
+  const triplet = channelIdentity(events, workspaceId || 'unknown').triplet;
   const cursorPath = cursorFilePath(triplet, slug, { transport: hit.transport });
   const state = readCursorState(cursorPath, triplet, slug, hit.transport);
 

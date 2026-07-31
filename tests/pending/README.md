@@ -64,18 +64,13 @@ family, matching the existing `acquireRepoClaim` shape) because the design speci
 mechanism, not an API. An implementer who picks different names should rename in the test
 rather than weaken it.
 
-## test-collab-harness-identity.mjs — failure class 11
+## test-collab-harness-identity.mjs — failure class 11 — RESOLVED, moved to `tests/`
 
 Clearing the harness environment must not change who a participant is.
 
-Red against shipped code, reproducing the live `core-gemini@claude-code` mislabel
-mechanically. There is no `participant_id`: identity *is* the triplet
-`workspace@harness:machine`, and `deriveTriplet()` recomputes `detectHarness()` on every
-call. The harness is not an advisory field beside identity, it is a substring of it, so a
-changed environment renames the participant rather than degrading a label.
-
-Wider than the name: `cursorFilePath()` partitions cursor state by harness and embeds the
-triplet in the filename, so the same defect silently resets a participant's read position.
-
-**The decision this waits on:** minting and persisting a stable `participant_id` at join is a
-schema change that every existing channel has to tolerate.
+The decision it waited on was taken: a `participant_id` is minted once and persisted, the
+triplet is frozen at mint, and `harness` became an advisory field beside identity rather than
+a substring of it. `cursorFilePath()` no longer partitions by harness. The test lives at
+`tests/test-collab-harness-identity.mjs` and CI protects it there; the compatibility read for
+channels whose join events predate participant ids is covered by
+`tests/test-collab-legacy-participant-id.mjs`.

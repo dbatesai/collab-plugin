@@ -117,14 +117,43 @@ test('updateCommitmentTracking: no-op when no next_update_by field', () => {
 
 // --- cursorFilePath ---
 
-test('cursorFilePath: includes machine, harness, transport, and encoded triplet', () => {
+test('cursorFilePath: includes machine, transport, workspace, and slug', () => {
   const triplet = 'core-framework@claude-code:Jennifer-Aniston';
   const path = cursorFilePath(triplet, 'my-slug', { machineSlug: 'test-machine', transport: 'github:files' });
   assert.ok(path.includes('test-machine'), 'should include machine slug');
-  assert.ok(path.includes('claude-code'), 'should include harness');
   assert.ok(path.includes('github-files'), 'should include encoded transport');
+  assert.ok(path.includes('core-framework'), 'should include the workspace component');
+  assert.ok(path.includes('Jennifer-Aniston'), 'should include the machine component');
   assert.ok(path.includes('my-slug'), 'should include collab slug');
   assert.ok(path.endsWith('.json'), 'should end with .json');
+});
+
+// The harness used to appear twice in this path — as a directory segment and inside the
+// encoded triplet — so an agent whose harness reading changed came back to a cursor file
+// that did not exist and silently re-read from an empty position. The harness is advisory;
+// nothing partitioned by it can be a read position.
+test('cursorFilePath: the harness appears nowhere in the path', () => {
+  const triplet = 'core-framework@claude-code:Jennifer-Aniston';
+  const path = cursorFilePath(triplet, 'my-slug', { machineSlug: 'test-machine', transport: 'localhost' });
+  assert.ok(!path.includes('claude-code'), `harness leaked into the cursor path: ${path}`);
+});
+
+test('cursorFilePath: a harness relabel resolves to the SAME cursor file', () => {
+  const opts = { machineSlug: 'm', transport: 'localhost' };
+  const asClaude = cursorFilePath('core-framework@claude-code:Jennifer-Aniston', 'slug', opts);
+  const asGemini = cursorFilePath('core-framework@gemini:Jennifer-Aniston', 'slug', opts);
+  const asUnknown = cursorFilePath('core-framework@some-other-harness:Jennifer-Aniston', 'slug', opts);
+  assert.equal(asGemini, asClaude, 'a harness change stranded the read position');
+  assert.equal(asUnknown, asClaude, 'a second, unrelated harness change stranded the read position');
+});
+
+test('cursorFilePath: a different MACHINE is still a different cursor', () => {
+  // Only the harness is advisory. A hostname that drifted is a different identity, and the
+  // repair for that is an explicit rejoin — not a shared read position.
+  const opts = { machineSlug: 'm', transport: 'localhost' };
+  const a = cursorFilePath('core-framework@claude-code:Jennifer-Aniston', 'slug', opts);
+  const b = cursorFilePath('core-framework@claude-code:JenniferAniston', 'slug', opts);
+  assert.notEqual(a, b, 'two machines collapsed onto one cursor file');
 });
 
 test('cursorFilePath: @ and : are not in filename (encoded)', () => {

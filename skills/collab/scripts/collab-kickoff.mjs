@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   deriveSlug, appendEvent, renderEventsJsonl,
-  deriveTriplet, gitPullRebase, gitCommitPush, generatePin,
+  resolveIdentity, gitPullRebase, gitCommitPush, generatePin,
   assertSlugUnique, generateEventId, authorSlugFromTriplet,
 } from './collab-event-helpers.mjs';
 import {
@@ -92,7 +92,10 @@ export async function kickoff(message, options = {}) {
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
 
   const igm = deriveIGM(message);
-  const triplet = deriveTriplet(workspaceId);
+  // Mints the participant on first use and reads the persisted record after. `harness` is
+  // read fresh and travels beside the identity on each event, never inside it.
+  const identity = resolveIdentity(workspaceId);
+  const triplet = identity.triplet;
   const nowTs = new Date().toISOString();
   const collabPin = pin || generatePin();
   const tickMin = typeof tickIntervalMinutes === 'number'
@@ -112,6 +115,8 @@ export async function kickoff(message, options = {}) {
     event_id: kickoffEvtId,
     ts: nowTs,
     author: triplet,
+    participant_id: identity.participant_id,
+    harness: identity.harness,
     slug,
     type: 'kickoff',
     references: [],
@@ -131,6 +136,8 @@ export async function kickoff(message, options = {}) {
     event_id: generateEventId(joinTs, authorSlug),
     ts: joinTs,
     author: triplet,
+    participant_id: identity.participant_id,
+    harness: identity.harness,
     slug,
     type: 'join',
     references: [kickoffEvtId],
@@ -145,7 +152,8 @@ export async function kickoff(message, options = {}) {
   }
 
   return {
-    slug, triplet, dir: collabDir, transport,
+    slug, triplet, participantId: identity.participant_id, harness: identity.harness,
+    dir: collabDir, transport,
     tickIntervalMinutes: tickMin, ratificationWindowMinutes: ratMin,
     kickoffEvt, joinEvt, pin: collabPin,
   };
