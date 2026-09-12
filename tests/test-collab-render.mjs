@@ -113,3 +113,77 @@ test('render skips git on localhost transport', async () => {
 
   rmSync(dir, { recursive: true, force: true });
 });
+
+// ------------------------------------------------------------ eligibility v1: Measures + Waiting
+
+const R1 = 'core-codex@codex:host';
+const R2 = 'core-gemini@antigravity:host';
+const P = 'core-framework@claude-code:home';
+const MEASURED = [
+  { event_id:'evt-001', ts:'2026-09-11T10:00:00Z', author:P, slug:'m', type:'kickoff', references:[],
+    payload:{ message:'m', wall_clock_hours:24, tick_interval_minutes:5, igm:{ intention:'i', goal:'g', measure:'x' }, capabilities_wanted:['review'],
+      ratified_completion_measures:[
+        { id:'M-A', description:'adapter A conforms', requires_review_from:R1 },
+        { id:'M-B', description:'adapter B conforms', requires_review_from:R1 },
+        { id:'M-C', description:'Windows run is clean', requires_review_from:R2 } ] } },
+  { event_id:'evt-002', ts:'2026-09-11T10:00:00Z', author:P, slug:'m', type:'join', references:['evt-001'], payload:{ capability_match:[], commitment:'own' } },
+  { event_id:'evt-003', ts:'2026-09-11T10:01:00Z', author:R1, slug:'m', type:'join', references:['evt-001'], payload:{ capability_match:[], commitment:'review', owes_review:['M-A','M-B'] } },
+  { event_id:'evt-004', ts:'2026-09-11T10:02:00Z', author:R2, slug:'m', type:'join', references:['evt-001'], payload:{ capability_match:[], commitment:'review', owes_review:['M-C'] } },
+];
+const row = (md, id) => md.split('\n').find(l => l.startsWith(`| ${id} |`));
+
+test('status/measures: every declared measure has a row with reviewer, state, and scope', () => {
+  const events = [...MEASURED,
+    { event_id:'evt-005', ts:'2026-09-11T10:10:00Z', author:R1, slug:'m', type:'ratify', references:[], payload:{ measures:['M-A'] } },
+    { event_id:'evt-006', ts:'2026-09-11T10:11:00Z', author:R2, slug:'m', type:'object', references:[], payload:{ reason:'red on Windows', measures:['M-C'] } }];
+  const md = buildStatusMd(events, 'm');
+  assert.ok(md.includes('## Measures'), md);
+  assert.match(row(md, 'M-A'), new RegExp(`\\| ${R1} \\| ratified \\| scoped \\|`));
+  assert.match(row(md, 'M-B'), new RegExp(`\\| ${R1} \\| unmet \\| — \\|`));
+  assert.match(row(md, 'M-C'), new RegExp(`\\| ${R2} \\| objected \\| scoped \\|`));
+  assert.ok(md.includes('red on Windows'), 'the objection reason is part of the record');
+});
+
+test('status/measures: a legacy-shaped credit is labeled legacy', () => {
+  const events = [...MEASURED,
+    { event_id:'evt-005', ts:'2026-09-11T10:10:00Z', author:P, slug:'m', type:'propose-close', references:[], payload:{ synthesis:'s', igm_met:{} } },
+    { event_id:'evt-006', ts:'2026-09-11T10:11:00Z', author:R1, slug:'m', type:'ratify', references:['evt-005'], payload:{} }];
+  const md = buildStatusMd(events, 'm');
+  assert.match(row(md, 'M-A'), /\| ratified \| legacy \|/);
+  assert.match(row(md, 'M-B'), /\| ratified \| legacy \|/);
+});
+
+test('status/measures: a legacy ledger renders no Measures section (control)', () => {
+  assert.ok(!buildStatusMd(BASE, 'test-collab').includes('## Measures'));
+});
+
+test('status/waiting: an open request is a row; a delivered one is gone; no open requests → no section', () => {
+  const req = { event_id:'evt-005', ts:'2026-09-11T10:10:00Z', author:P, slug:'m', type:'turn', references:[],
+    payload:{ intent:'probe', body:'please review M-A', signals:[], state:'blocked', owner:R1, waiting_on:R1, next_update_by:'2026-09-11T10:40:00Z', on_timeout:'proceed-alone' } };
+  const md = buildStatusMd([...MEASURED, req], 'm');
+  assert.ok(md.includes('## Waiting'), md);
+  const line = md.split('\n').find(l => l.includes('evt-005'));
+  assert.ok(line, 'the request row is missing');
+  assert.match(line, new RegExp(`${P} → ${R1}`));
+  assert.ok(line.includes('2026-09-11T10:40:00Z') && line.includes('proceed-alone') && line.includes('requested'), line);
+
+  const delivered = { event_id:'evt-006', ts:'2026-09-11T10:20:00Z', author:R1, slug:'m', type:'turn', references:['evt-005'],
+    payload:{ intent:'synthesize', body:'reviewed', signals:['delivered'], state:'working', owner:R1, waiting_on:null } };
+  const md2 = buildStatusMd([...MEASURED, req, delivered], 'm');
+  assert.ok(!md2.includes('## Waiting'), 'a delivered request is still shown as waiting');
+  assert.ok(!buildStatusMd(MEASURED, 'm').includes('## Waiting'));
+});
+
+test('status/close: a close carrying a contract receipt prints it', () => {
+  const events = [...MEASURED,
+    { event_id:'evt-005', ts:'2026-09-11T11:00:00Z', author:P, slug:'m', type:'close', references:[],
+      payload:{ final_synthesis:'x', outcome:'complete-to-authority-boundary',
+        ratified_measures:[{ id:'M-A', by:R1, scope:'scoped' }], objected_measures:[],
+        unmet_ratified_measures:[{ id:'M-B', requires_review_from:R1 }, { id:'M-C', requires_review_from:R2 }],
+        missing_reviews_from:[R1, R2], note:'Closed via the stall net.' } }];
+  const md = buildStatusMd(events, 'm');
+  assert.ok(md.includes('closed — complete-to-authority-boundary'));
+  assert.ok(md.includes('Unmet: M-B, M-C'), md);
+  assert.ok(md.includes(`Missing reviews from: ${R1}, ${R2}`), md);
+  assert.ok(md.includes('Closed via the stall net.'));
+});

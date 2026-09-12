@@ -147,19 +147,23 @@ test('chase: non-ISO next_update_by is skipped (the HC-emitter interop bug)', as
   } finally { cleanupLocalCollab(slug); }
 });
 
-test('chase: no chase when no next_update_by commitment', async () => {
-  const slug = 'chase-test-no-commitment';
-  const { dir } = tmpLocalCollab(slug);
-  try {
-    kickoffEvent(dir, slug);
-    joinEvent(dir, slug, 'hk@claude-code:m');
-    joinEvent(dir, slug, 'hc@codex:m');
-    turnEvent(dir, slug, 'hc@codex:m', 30, null); // no deadline
-    const result = await tickDeterministic(slug, {
-      workspaceId: 'test', triplet: 'hk@claude-code:m', dryRun: true,
-    });
-    assert.equal(result.chase_events_emitted, 0, 'no commitment → no chase');
-  } finally { cleanupLocalCollab(slug); }
+test('chase: a turn with no next_update_by is a commitment one cadence out — no chase before it, a chase after grace', async () => {
+  // The kickoff declares no cadence, so the default 30-minute tick applies: a turn 20 minutes
+  // ago is due in 10; a turn 40 minutes ago was due 10 minutes ago, past the 5-minute grace.
+  for (const [minsAgo, expected] of [[20, 0], [40, 1]]) {
+    const slug = `chase-test-default-deadline-${minsAgo}`;
+    const { dir } = tmpLocalCollab(slug);
+    try {
+      kickoffEvent(dir, slug);
+      joinEvent(dir, slug, 'hk@claude-code:m');
+      joinEvent(dir, slug, 'hc@codex:m');
+      turnEvent(dir, slug, 'hc@codex:m', minsAgo, null); // no deadline declared
+      const result = await tickDeterministic(slug, {
+        workspaceId: 'test', triplet: 'hk@claude-code:m', dryRun: true,
+      });
+      assert.equal(result.chase_events_emitted, expected, `turn ${minsAgo} min ago with the default deadline`);
+    } finally { cleanupLocalCollab(slug); }
+  }
 });
 
 test('chase: flood limit — at most 3 chase events per participant per 60min', async () => {

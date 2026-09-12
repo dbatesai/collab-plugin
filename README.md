@@ -184,13 +184,13 @@ Every event in `events.jsonl` has the same envelope plus a type-specific `payloa
 
 | Type | Required payload fields | Who emits | When |
 |---|---|---|---|
-| `kickoff` | `message`, `igm`, `capabilities_wanted`, `wall_clock_hours` | Originator | Exactly once, at kickoff |
-| `join` | `capability_match`, `commitment` | Joining agent | Once per agent per collab |
+| `kickoff` | `message`, `igm`, `capabilities_wanted`, `wall_clock_hours`; `ratified_completion_measures` required when `capabilities_wanted` is non-empty | Originator | Exactly once, at kickoff |
+| `join` | `capability_match`, `commitment`; optional `owes_review: [<measure ids>]` acknowledging the measures that name you | Joining agent | Once per agent per collab |
 | `decline` | `reason` | Agent who won't join | Once per agent per collab |
 | `turn` | `intent`, `body`, **`signals`** | Any joined agent | Any tick |
 | `propose-close` | `synthesis`, `igm_met` | Any joined agent | Once per close cycle; objection resets |
-| `ratify` | (none) — optional `agreement_notes` | Any joined agent | Response to propose-close |
-| `object` | `reason` | Any joined agent | Response to propose-close; invalidates it |
+| `ratify` | (none) — optional `agreement_notes`; **`measures: [<ids>]` required from a reviewer the kickoff names** | Any joined agent | Response to propose-close; a scoped verdict may land before one |
+| `object` | `reason`; **`measures: [<ids>]` required from a reviewer the kickoff names** | Any joined agent | Response to propose-close; invalidates it |
 | `withdraw` | (none) — optional `reason` | Any joined agent | Voluntary exit; removes from ratification math |
 | `close` | `final_synthesis`, `outcome` | Originator (for `converged`); any agent (for safety-net aborts) | Terminal |
 
@@ -225,10 +225,13 @@ igm:
 1. Any joined agent emits `propose-close` with `synthesis` and per-dimension `igm_met` ({intention, goal, measure} each with `met` + `rationale`).
 2. Each other joined agent has 3 of its own ticks (≈90 minutes at the 30-minute /loop cadence) to emit `ratify` or `object`.
 3. **Silence as ratification:** a joined agent who has emitted no events for 90+ minutes after the `propose-close` is treated as implicitly ratified. This keeps offline peers (usage limit, machine down) from blocking convergence forever. An agent who explicitly wants to ratify or object can do so anytime; silence only kicks in after the 90-minute window.
-4. **Except for a required reviewer.** A kickoff can declare that a particular participant's review is itself a ratified completion measure, with `--required-review <triplet>` (which writes `ratified_completion_measures` onto the kickoff payload). Silence from that participant never ratifies, however long it runs — their review is the measure, so silence is the missing evidence, not consent. This narrows rule 3; it does not repeal it. Everyone not named still ratifies by going quiet.
-5. If all other joined agents have ratified (explicitly or implicitly), the agent that emitted `propose-close` emits `close` with `outcome: converged` and `final_synthesis`.
-6. If a declared review never arrives, the proposer's tick closes as `complete-to-authority-boundary` instead: it carries the synthesis and the real ratifiers, and it names the unmet measure and the participant who owed it. There is no outcome that waives a ratified measure by calling the result degraded — the measure is discharged by a real `ratify` or `object`, or it is reported as missing. A collab that produced nothing usable, but left nothing broken, closes as `failed-safely`.
-7. All agents see `close` on next tick; cancel their own `/loop`; exit.
+4. **Except for a required reviewer.** A kickoff that wants other participants declares its completion measures, with `--measure "<id>|<description>|<triplet>"` (repeatable) or the short form `--required-review <triplet>`; both write `ratified_completion_measures` onto the kickoff payload. Silence from a named reviewer never ratifies, however long it runs — their review is the measure, so silence is the missing evidence, not consent. This narrows rule 3; it does not repeal it. Everyone not named still ratifies by going quiet.
+5. A named reviewer's `ratify` or `object` carries `measures: [<ids>]` — the measures it judges, no others. It counts from the moment it lands until the close, whether or not a propose-close exists yet; the first judgment on a measure stands. The writer refuses a bare verdict from a named reviewer (`verdict-unscoped`); the reader still accepts one placed by hand or by an older writer, reading it author-wide after the active propose-close as 1.1.0 did, and labels that credit `scope: 'legacy'`.
+6. If all other joined agents have ratified (explicitly or implicitly) and every declared measure carries a `ratify` from its reviewer, the agent that emitted `propose-close` emits `close` with `outcome: converged` and `final_synthesis`.
+7. Otherwise the proposer's tick closes by the contract: any measure objected to → `failed-safely`; any measure ratified → `complete-to-authority-boundary`; nothing judged → `failed-safely`. The close carries a receipt (`ratified_measures`, `objected_measures`, `unmet_ratified_measures`, `missing_reviews_from`, `ratified_by`, `note`). There is no outcome that waives a ratified measure by calling the result degraded.
+8. All agents see `close` on next tick; cancel their own `/loop`; exit.
+
+Every `turn` names `waiting_on`; the recipient sees it as an open request (tick result `open_requests`, `STATUS.md` **Waiting** table) until they reference it with an `accepted`, `declined`, or `delivered` signal, answer it with a verdict the reader credits (optionally on the measures the request named in `measures`), or the requester's timeout fallback lapses it. A turn with no `next_update_by` is due one tick cadence after its timestamp; an absent `on_timeout` means `proceed-alone`; the first tick at or after the deadline executes the fallback once, and chases are reminders that never gate it.
 
 Any `object` event invalidates the `propose-close`. The collab continues; anyone can propose-close again later. No retry cap — the objection-deadlock safety net (3 cycles) bounds it.
 
@@ -237,7 +240,7 @@ Any `object` event invalidates the `propose-close`. The collab continues; anyone
 | Net | Default | Detection | Close outcome |
 |---|---|---|---|
 | Wall-clock | 24h from kickoff `ts` | Each tick: `now - kickoff.ts > wall_clock_hours * 3600` | `aborted-budget` |
-| Stall | 6 consecutive ticks with no new events from any participant | Each tick tracks `last_event_ts` for the slug | `aborted-stall` |
+| Stall | 6 consecutive ticks with no new events from any participant | Each tick tracks `last_event_ts` for the slug | `aborted-stall` for a ledger with no declared measures; otherwise the contract outcome (`failed-safely` / `complete-to-authority-boundary`) with the same receipt the proposer route writes |
 | Objection deadlock | 3 propose-close cycles, each objected to | Each tick scans event history | `aborted-objection` |
 | David abort | `/collab "abort slug X"` on any agent | Direct emit | `aborted-david` |
 

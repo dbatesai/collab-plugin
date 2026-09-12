@@ -1,0 +1,168 @@
+/**
+ * run-mutations.mjs — mutation controls for the eligibility v1 guarantees.
+ *
+ * A test that fails only because an export is missing proves the symbol is used, not that
+ * the assertion detects the defect. Each entry below is a targeted change to one guarantee
+ * — the smallest edit that reintroduces the failure the guarantee exists to prevent — and
+ * the test files that must catch it. The script copies the tree, applies one mutation,
+ * runs those files, and reports how many tests failed. A mutation that survives (zero
+ * failures) fails the run.
+ *
+ * Not a `test-*.mjs` file on purpose: it runs the suite many times over.
+ *   node tests/tools/run-mutations.mjs
+ */
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const H = 'skills/collab/scripts/collab-event-helpers.mjs';
+const T = 'skills/collab/scripts/collab-tick.mjs';
+const V = 'skills/collab/scripts/collab-validate.mjs';
+const R = 'skills/collab/scripts/collab-render.mjs';
+const K = 'skills/collab/scripts/collab-kickoff.mjs';
+
+export const MUTATIONS = [
+  { id: 'M1 legacy verdict credited before the propose-close', file: H,
+    find: '} else if (proposeIdx !== -1 && i > proposeIdx) {', replace: '} else {',
+    tests: ['test-collab-eligibility.mjs', 'test-collab-replay-legacy.mjs'] },
+  { id: 'M2 an objection no longer blocks the close outcome', file: H,
+    find: 'if (objected_measures.length === 0 && ratified_measures.length > 0) {', replace: 'if (ratified_measures.length > 0) {',
+    tests: ['test-collab-eligibility.mjs', 'test-collab-eligibility-tick.mjs'] },
+  { id: 'M3 a scoped verdict with a bad id gets partial credit', file: H,
+    find: "if (ids.some(id => !owed.includes(id) || judged.has(`${e.author}\\n${id}`))) return; // whole-event refusal", replace: '',
+    tests: ['test-collab-wait-cycle.mjs'] },
+  { id: 'M4 a missing deadline is no deadline', file: H,
+    find: 'return new Date(Date.parse(turn.ts) + getTickIntervalMs(events)).toISOString();', replace: 'return null;',
+    tests: ['test-collab-default-deadline.mjs', 'test-collab-chase.mjs'] },
+  { id: 'M5 the fallback waits for the chase sequence again (R3-H1)', file: H,
+    find: 'if (!settled) due.push({ participant, action, for_deadline: dl, chases_so_far: chases });',
+    replace: 'if (!settled && chases >= CHASE_FLOOD_LIMIT) due.push({ participant, action, for_deadline: dl, chases_so_far: chases });',
+    tests: ['test-collab-obligations.mjs', 'test-collab-default-deadline.mjs', 'test-collab-eligibility-tick.mjs'] },
+  { id: 'M6 any referencing verdict delivers a request (R3-M1)', file: H,
+    find: 'if (ids && (about.length === 0 || about.some(id => ids.includes(id)))) { req.state = \'delivered\'; break; }',
+    replace: 'if (true) { req.state = \'delivered\'; break; }',
+    tests: ['test-collab-wait-cycle.mjs', 'test-collab-eligibility-tick.mjs'] },
+  { id: 'M7 the writer gate is skipped', file: H,
+    find: 'const gate = writerGateError(collabDir, event);', replace: 'const gate = null;',
+    tests: ['test-collab-append-noclobber.mjs'] },
+  { id: 'M8 contract-invalid never fires', file: T,
+    find: 'if (errors.length && joiners.size >= 2) {', replace: 'if (false) {',
+    tests: ['test-collab-eligibility-tick.mjs'] },
+  { id: 'M9 the stall net ignores the contract', file: T,
+    find: "const contract = net === 'stall' ? computeCloseOutcome(events, nowTs, { route: 'stall' }) : null;", replace: 'const contract = null;',
+    tests: ['test-collab-eligibility-tick.mjs'] },
+  { id: 'M10 the validator misses verdict-duplicate', file: V,
+    find: 'else if (mine.has(id))', replace: 'else if (false)',
+    tests: ['test-collab-eligibility-validate.mjs'] },
+  { id: 'M11 STATUS.md drops the Measures table', file: R,
+    find: 'if (verdicts.size) {', replace: 'if (false) {',
+    tests: ['test-collab-render.mjs'] },
+  { id: 'M12 a non-solo kickoff needs no measures', file: K,
+    find: 'if (capabilitiesWanted.length && measures.length === 0) {', replace: 'if (false) {',
+    tests: ['test-collab-kickoff.mjs'] },
+  { id: 'M13 silence credits a measure (a required reviewer implicitly ratifies)', file: H,
+    find: 'if (required.has(agent)) continue;', replace: '',
+    tests: ['test-collab-peer-silence-terminal.mjs'] },
+  { id: 'M14 the publisher ignores authorship — a foreign event is delivered (R3-H4)', file: H,
+    find: "if (e?.event_id !== base.slice(0, -5) || e?.author !== author) return false;",
+    replace: "if (e?.event_id !== base.slice(0, -5)) return false;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M15 the retry gate trusts a clean tree — a committed-but-unpushed record is never delivered (R3-H3)', file: H,
+    find: 'if (ahead.length) {', replace: 'if (owned.length) {',
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M16 renders are not recorded — the close route cannot deliver its own STATUS.md (R3-H4)', file: H,
+    find: "export function recordOwnedArtifact(collabDir, author, relPath, bytes) {", replace: "export function recordOwnedArtifact(collabDir, author, relPath, bytes) { return gitBlobHash(bytes);",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M17 committed work is judged by location again — a committed draft in the channel is pushed (R3-H4)', file: H,
+    find: "if (!inChannel(path) || st.startsWith('D')) return true;", replace: "if (!inChannel(path)) return true; if (inChannel(path)) return false;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M18 ownership is bytes only — bytes recorded for one path authorize another (R3-H4)', file: H,
+    find: "return Array.isArray(manifest[relPath]) && manifest[relPath].includes(blobHash);",
+    replace: "return Object.values(manifest).flat().includes(blobHash);",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M19 renders are derived from every local event — an unpublished foreign event travels through them (R3-H4)', file: R,
+    find: "    return e.author === author ? e : null;",
+    replace: "    return e;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M20 renders overwrite whatever is there — an unrecorded existing file is destroyed (R3-H4)', file: R,
+    find: "if (!bounded || !existsSync(p)) return true;", replace: "return true;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M21 a published input is eligible by path, not bytes — an edited published event is derived into renders (R3-H4)', file: R,
+    find: "      if (src.hash === upstream.get(src.path)) return e;",
+    replace: "      if (true) return e;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M22 the reader accepts a file whose name is not its event id — a shadow file borrows a published identity (R3-H4)', file: H,
+    find: "if (name !== `${event.event_id}.json`) {", replace: "if (false) {",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M23 a local file that contradicts a published JSONL line is taken as that event — the local edit is derived and delivered', file: R,
+    find: "      if (line.canonical === JSON.stringify(e)) return e;", replace: "      return e;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M24 a conflicting local file is excluded instead of resolved to the published line — published content is erased from the derived file', file: R,
+    find: "      conflicts.push({ event_id: e.event_id, path: src.path, reason: 'local file differs from the published events.jsonl line' });\n      return line.event;",
+    replace: "      return null;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M25 the tick no longer refuses on a filename violation (David: fatal block)', file: T,
+    find: "if (violations.length) {", replace: "if (false) {",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M26 delivery treats a file contradicting a published JSONL line as an owned new event', file: H,
+    find: "return !published || published.canonical === JSON.stringify(e);", replace: "return true;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M27 quarantine runs with a shadow present and targets a path rebuilt from the id (R3-H6)', file: 'skills/collab/scripts/collab-v1-quarantine.mjs',
+    find: "if (violations.length) { report.refused = { reason: 'event-filename-violation', paths: violations }; return report; }", replace: "",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M28 deliverChannel publishes with a shadow present (R3-M2)', file: H,
+    find: "    return { published_paths: [], foreign_paths: [], blocked: { reason: 'event-filename-violation', paths: violations }, pushed: false, verified: false };", replace: "    void 0;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M29 render writes output with a shadow present (R3-M2)', file: R,
+    find: "if (violations.length) return { refused: { reason: 'event-filename-violation', paths: violations }, blocked: null, conflicts: [], delivery: null };", replace: "",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M30 quarantineEvent trusts the supplied object — a mismatched event retargets canonical history (R3-H6 residual)', file: 'skills/collab/scripts/collab-v1-quarantine.mjs',
+    find: "if (JSON.stringify(atSource) !== JSON.stringify(event)) {", replace: "if (false) {",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M31 quarantineEvent ignores channel-wide filename violations (R3-H6 residual)', file: 'skills/collab/scripts/collab-v1-quarantine.mjs',
+    find: "  const violations = eventFilenameViolations(collabDir);\n  if (violations.length) {\n    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything",
+    replace: "  const violations = [];\n  if (violations.length) {\n    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M32 pull depends on the user\'s rebase.autostash — a dirty tree makes the tick throw instead of blocking (CI on PR #6)', file: 'skills/collab/scripts/collab-event-helpers.mjs',
+    find: "runGit(repo, ['pull', '--rebase', '--autostash']);",
+    replace: "runGit(repo, ['pull', '--rebase']);",
+    tests: ['test-collab-git-delivery.mjs'] },
+];
+
+function runOne(m) {
+  const dir = mkdtempSync(join(tmpdir(), 'collab-mutation-'));
+  try {
+    cpSync(join(ROOT, 'skills'), join(dir, 'skills'), { recursive: true });
+    cpSync(join(ROOT, 'tests'), join(dir, 'tests'), { recursive: true });
+    const path = join(dir, m.file);
+    const src = readFileSync(path, 'utf8');
+    const n = src.split(m.find).length - 1;
+    if (n !== 1) return { ...m, error: `find string occurs ${n} times, expected 1` };
+    writeFileSync(path, src.replace(m.find, m.replace));
+    const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...m.tests.map(t => join('tests', t))], {
+      cwd: dir, encoding: 'utf8', env: { ...process.env, COLLAB_STATE_ROOT: mkdtempSync(join(tmpdir(), 'collab-state-')) },
+    });
+    const out = r.stdout + r.stderr;
+    const fail = Number((/^# fail (\d+)/m.exec(out) || [])[1] ?? NaN);
+    const total = Number((/^# tests (\d+)/m.exec(out) || [])[1] ?? NaN);
+    const names = [...out.matchAll(/^not ok \d+ - (.+)$/gm)].map(x => x[1]);
+    return { ...m, fail, total, names };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+if (resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  let survived = 0;
+  for (const m of MUTATIONS) {
+    const r = runOne(m);
+    if (r.error) { survived++; console.log(`ERROR    ${r.id} — ${r.error}`); continue; }
+    const caught = r.fail > 0;
+    if (!caught) survived++;
+    console.log(`${caught ? 'caught  ' : 'SURVIVED'} ${r.id} — ${r.fail}/${r.total} failed in ${r.tests.join(', ')}`);
+    for (const n of r.names.slice(0, 4)) console.log(`           ↳ ${n}`);
+  }
+  console.log(survived ? `\n${survived} mutation(s) survived` : '\nevery mutation was caught');
+  process.exit(survived ? 1 : 0);
+}

@@ -1,0 +1,14 @@
+{
+  "event_id": "evt-202607312351-core-framework-af4c0939-1e40-470a-942b-59de3a39edf2",
+  "ts": "2026-07-31T23:51:17.923Z",
+  "author": "core-framework@claude-code:host",
+  "slug": "agy-keel-and-hale-agree-on-shared-spec-for-teamgoa",
+  "participant_id": "pcp-e7d8950e-2750-4dfb-ac13-41ce53e6c6b1",
+  "harness": "claude-code",
+  "type": "close",
+  "references": [],
+  "payload": {
+    "final_synthesis": "Safety net: stall",
+    "outcome": "aborted-stall"
+  }
+}
