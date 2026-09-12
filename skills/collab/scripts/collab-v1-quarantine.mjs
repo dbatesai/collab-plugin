@@ -97,7 +97,7 @@ export function quarantineEvent(collabDir, event, reason, opts = {}) {
   let atSource;
   try { atSource = JSON.parse(readFileSync(src, 'utf8')); } catch { return null; }
   if (JSON.stringify(atSource) !== JSON.stringify(event)) {
-    throw new Error(`quarantine-source-mismatch: the supplied event is not the bytes at events/${sourceName}; nothing was moved`);
+    throw new Error(`quarantine-source-mismatch: the supplied event does not re-serialize to the parsed content of events/${sourceName} (key order included); nothing was moved`);
   }
   const dst = join(eventsDir, `.quarantined-${stem}.json`);
   const quarantined = {
