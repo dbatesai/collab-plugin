@@ -88,7 +88,11 @@ Pass the route's `transport` field through as `--transport`. A kickoff always ha
 
 `--ratification-window-minutes <n>` (optional) decouples the silence-as-ratification window from the tick cadence. Default is `3 × tick` for git transports and `max(3 × tick, 30)` for localhost — the 30-minute floor on localhost prevents a 1-minute tick from collapsing the ratification window to 3 minutes.
 
-`--required-review <participant-triplet>` (optional; repeatable) declares that participant's review to be a ratified completion measure. It writes `ratified_completion_measures` onto the kickoff payload, and it changes one thing at tick time: silence from that participant never ratifies. Everyone else still ratifies by going quiet. Use it when a named review is the thing that makes the outcome real — a goal that closes without it has not met its own measure, and no amount of elapsed time makes that untrue.
+`--measure "<id>|<description>|<participant-triplet>"` (repeatable) declares a completion measure: a condition with an id, a description that says what done looks like, and the participant whose review discharges it. **A kickoff that wants other participants (`capabilities_wanted` non-empty) must declare at least one measure** — the writer refuses it otherwise with `completion-measures-required`. A solo kickoff needs none. The description has to be real: the inferred placeholder text is refused (`completion-measure-placeholder: <id>`), as are a missing reviewer, an empty description, or a duplicate id (`completion-measure-invalid: <id>`).
+
+`--required-review <participant-triplet>` (optional; repeatable) is the short form: it generates one measure, `independent-review-<participant>`, whose reviewer is that participant. Both flags merge onto `ratified_completion_measures` on the kickoff payload.
+
+Write measures per phase, not one for the whole goal. A single "the design is accepted" measure hides where a session actually stalled; three measures — the spec is reviewed, the adapter conforms, the Windows run is clean — let a reviewer discharge what they have seen and leave the rest visibly open. What the declaration changes at tick time: silence from a named reviewer never ratifies, a verdict from a named reviewer has to say which measures it judges, and the close outcome is computed from the measures rather than from who went quiet.
 
 `--min-version <semver>` (optional; default `0.2.0`) sets the minimum collab-plugin version a joining agent must run. Any v0.2 agent joins fine; older agents are rejected at the join check. Bump above `0.2.0` only when a kickoff relies on a feature shipped in a later patch.
 
@@ -147,7 +151,10 @@ This runs the deterministic part of the tick (pull, check safety nets, handle cl
 - `{ action: "close", reason: "<safety-net-or-converged>" }` — tick handled it; the close event was emitted. Cancel `/loop` and exit.
 - `{ action: "agent-decision-needed", route: "ratify-or-object" }` — see "Ratify or object" below.
 - `{ action: "agent-decision-needed", route: "turn-or-propose" }` — see "Turn or propose-close" below.
+- `{ action: "contract-invalid", errors, repair }` — the kickoff's declared measures would not pass this plugin's writer (a hand edit, or an older writer) and a second participant has joined. Nothing was written. Follow `repair`: close the session `failed-safely` and kick off again with valid `--measure` flags.
 - `{ action: "not-joined" }` — bug or weird state; ask the user.
+
+Every `agent-decision-needed` result also carries `open_requests` — the turns from other participants whose `waiting_on` names you, with their state (`requested` or `accepted`), deadline, and the requester's fallback — and `wait_cycles`, any pair in which two participants are each waiting on the other. Read `open_requests` before deciding what to emit: a request stays open until you reference it with a `declined` or `delivered` signal, or answer it with a scoped verdict. See "Requests you can see" below.
 
 #### Ratify or object
 
@@ -160,6 +167,8 @@ Another agent proposed close. You have 3 of your own ticks to decide (≈90 minu
 3. Decide: does the synthesis genuinely address each IGM dimension? If yes → emit `ratify`. If no → emit `object` with a specific reason.
 
 Use the same `node --input-type=module -e "..."` pattern as join, with `type: 'ratify'` and `payload: { agreement_notes: '<optional>' }` OR `type: 'object'` and `payload: { reason: '<what-is-missing>' }`. Set `references: ['<propose-close-event-id>']`.
+
+**If the kickoff names you as a reviewer, your verdict is scoped.** Add `measures: ['<id>', ...]` to the payload, listing exactly the measures you have judged and no others. `appendEvent` refuses a verdict from a named reviewer without it (`verdict-unscoped: <you> owes <ids>`); the validator refuses an id you do not owe (`verdict-reviewer-mismatch`) or that nobody declared (`measure-unknown`), and either refusal drops the whole event — there is no partial credit. You may judge your measures in separate events, and you may judge a measure before any propose-close exists: a scoped verdict counts from the moment it lands until the session closes. The first judgment you give a measure stands; a second verdict on the same id is refused as `verdict-duplicate` and reads as correspondence. That is a known limitation of v1 — there is no way to retract a scoped verdict short of the proposer re-kicking off. A participant who owes no measure ratifies or objects to the synthesis as a whole; a `measures` field from them is ignored with a warning.
 
 Bias toward objecting if anything is genuinely missing — the spec's `risk-9-bad-infrastructure-convergence` mitigation depends on first-class objections. Don't ratify out of agreeableness.
 
@@ -304,9 +313,23 @@ Every `turn` event you emit MUST include `next_update_by` as a **machine-parseab
 
 - `next_update_by` is the schema field — **always ISO 8601** (`YYYY-MM-DDTHH:MM:SSZ`). Never a human-readable string. The chase logic, drift tracking, and obligation displays all parse this field; a human string silently breaks them.
 - `next_update_by_local` (optional) carries the human-readable version for display in event bodies. Use your system's 12-hour local time with timezone abbreviation.
-- If you have no firm commitment, use an empty string (`""`) — that's valid and means "no declared deadline."
+- If you have no firm commitment, use an empty string (`""`). **An empty or absent deadline is not "no deadline": it defaults to your turn's timestamp plus one tick cadence**, computed by every reader and never written back. Past that plus the 5-minute grace, you are chased like anyone else.
+- `on_timeout` names what the other side does when your deadline lapses and the chase sequence is exhausted: `proceed-alone`, `reassign`, `degrade-and-continue`, or `close-degraded`. Absent, it defaults to `proceed-alone` — the one action that moves no ownership. A value outside that list is refused as an unbounded wait.
+- Only your own next substantive turn resets your deadline. A chase from the other side never does, and neither default ever moves the wall-clock or stall nets.
 
 Set a realistic deadline. Setting it far in the future to avoid chases defeats the accountability mechanism. A 20–30 minute window for plan work, 5 minutes for quick factual replies.
+
+### Requests you can see
+
+Every v1 turn names `waiting_on`. From this version the recipient's side reads it: a turn whose `waiting_on` is you is an open request on you, listed in the tick result's `open_requests` and in the **Waiting** table in `STATUS.md` (requester → recipient, since, deadline, fallback, state). A request moves through `requested` → `accepted` → `delivered`, or ends `declined` or `lapsed`:
+
+- Reference the request's event id and put `accepted`, `declined`, or `delivered` in `signals`. `accepted` changes the state, not the visibility — the request stays open until `delivered` or `declined`. A scoped `ratify`/`object` that references the request also delivers it.
+- Any other turn that merely references the request changes nothing. A clarifying question, a progress note, a later mention: the request is still open. Only the signals above, or the requester's own timeout fallback, resolve it.
+- `lapsed` is the requester's timeout action executing — the request is closed for the requester, and whatever measure it was about is still unmet.
+
+A **wait cycle** is two participants each holding an open request on the other. The tick reports it in `wait_cycles` and records it once per pair as a system turn (`signals: ['wait-cycle', <a>, <b>]`), keyed by the two request ids so an unchanged pair is not re-announced. Acceptance on both sides is still a cycle. One side has to deliver, decline, or let its deadline lapse; the first authorized tick at or after that deadline takes the declared fallback.
+
+**Reread before you write.** Between reading the ledger and appending your event another participant may have delivered, declined, or closed. Re-read the ledger immediately before emitting a verdict or a close, and reference the event you are answering. This is a convention, not a guarantee: two writers can still read the same state and both append, and v1 does not detect that race — it is recorded as follow-up work, not solved here.
 
 ### What counts as a substantive turn vs a heartbeat
 
@@ -327,7 +350,7 @@ If you miss your `next_update_by` plus a 5-minute grace period, the other side's
 2. Set a new `next_update_by` in your response
 3. The chase will stop when you post something
 
-The flood limit is 3 chase events per participant per 60-minute window, so prolonged silence will stop generating chases after 3 — but that doesn't mean the obligation has been forgotten.
+The flood limit is 3 chase events per participant per 60-minute window. After the third chase for a deadline the other side's tick executes your `on_timeout` action (default `proceed-alone`) and records a `timeout-action` event, once per deadline — silence does not make the obligation disappear; it makes the declared fallback happen.
 
 ### v1.0 typed payload (for v1 emitters)
 
@@ -373,5 +396,7 @@ Missing any of `state`, `owner`, `waiting_on`, or `next_update_by` causes the ev
 - `close` event `outcome` is one of: `converged` (ratification completed), `aborted-stall`, `aborted-budget` (wall-clock exceeded), `aborted-objection` (deadlock), `aborted-david` (user requested abort), `complete-to-authority-boundary` (work landed and is preserved, but a ratified completion measure has no review attached — emitted automatically by the tick), `failed-safely` (the goal did not complete, and nothing was left broken, half-written, or silently lost)
 - Single-agent collabs converge immediately on `propose-close` (no ratification needed)
 - **Silence-as-ratification:** a joined agent who emits no events for the ratification window after a propose-close is treated as implicitly ratifying. Explicit ratify/object events override silence. This handles offline peers (usage limits, crashes) without stalling convergence.
-- **Silence-as-ratification stops at a ratified completion measure.** A kickoff may declare `ratified_completion_measures: [{ id, description, requires_review_from }]`. Silence from a named reviewer never ratifies. When the proposer ticks with such a review still missing, the tick closes as `complete-to-authority-boundary` rather than `converged`, naming the unmet measure and the participant it was owed by, and counting only real ratifiers. This is a narrowing of the rule above, not a repeal: every participant not named still ratifies by going quiet.
+- **Silence-as-ratification stops at a ratified completion measure.** A kickoff may declare `ratified_completion_measures: [{ id, description, requires_review_from }]`. Silence from a named reviewer never ratifies. This is a narrowing of the rule above, not a repeal: every participant not named still ratifies by going quiet.
+- **A session with declared measures closes by its contract, on either route.** The proposer's close and the stall net use one calculation: any measure objected to → `failed-safely`; otherwise any measure ratified → `complete-to-authority-boundary`; nothing judged → `failed-safely`. Only the proposer route, with every measure ratified by its named reviewer and the synthesis ratified, closes `converged`. The close carries a receipt — `ratified_measures`, `objected_measures` (with reasons), `unmet_ratified_measures`, `missing_reviews_from`, `ratified_by`, and a note that says which route closed it. `aborted-stall` is the stall net's word for a ledger with no declared measures.
 - **A missing ratified review cannot be waived by degrading the result.** There is no outcome that closes a goal as done-with-caveats over a measure that has no evidence receipt. The measure is either discharged by a real `ratify` or `object` from the named reviewer, or it is reported as unmet in the terminal record.
+- **Interpret by shape, guarantee at write.** A verdict with a `measures` field is scoped: it credits exactly those ids, from the moment it lands until the close. A verdict without one from a named reviewer is the legacy shape: read author-wide, scoped to the propose-close on the table, exactly as 1.1.0 read it — so a 1.1.0 ledger computes the same outcome and the same unmet list it always did. Each credit in a receipt is labeled `scope: 'scoped'` or `scope: 'legacy'` to say how it was read. The plugin guarantees what its writer emits — every kickoff it creates for a non-solo session declares valid measures, and every verdict it writes from a named reviewer is scoped. It does not guarantee that every ledger the reader accepts contains scoped agreement. A `scope: 'legacy'` label on a credit records how that credit was interpreted; it does not prove the event's age, its writer, or explicit measure-level assent.
