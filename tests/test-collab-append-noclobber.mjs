@@ -120,3 +120,60 @@ test('9: a torn partial write is never delivered as an event, and a clean append
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ------------------------------------------------------------ eligibility v1: the writer gate
+
+const R1 = 'core-codex@codex:host';
+const Q = 'bblens@claude-code:work';
+function mkLedger(dir, { measures = true } = {}) {
+  const ko = { event_id: 'evt-001', ts: '2026-09-11T10:00:00.000Z', author: 'p@h:i', slug: 's', type: 'kickoff', references: [],
+    payload: { message: 'm', igm: { intention: 'i', goal: 'g', measure: 'x' }, capabilities_wanted: ['review'], wall_clock_hours: 24, transport: 'localhost' } };
+  if (measures) ko.payload.ratified_completion_measures = [
+    { id: 'M-A', description: 'adapter A conforms', requires_review_from: R1 },
+    { id: 'M-B', description: 'adapter B conforms', requires_review_from: R1 }];
+  // A legacy ledger was written by an older writer; this plugin's gate refuses a non-solo
+  // kickoff without measures, so the fixture lands on disk the way 1.1.0 left it.
+  if (measures) appendEvent(dir, ko);
+  else writeFileSync(join(dir, 'events', `${ko.event_id}.json`), JSON.stringify(ko, null, 2));
+}
+const verdict = (id, author, payload) => ({ event_id: id, ts: '2026-09-11T10:10:00.000Z', author, slug: 's', type: 'ratify', references: [], payload });
+
+test('gate: a bare verdict from a named reviewer is refused before any file is written', () => {
+  const dir = mkCollabDir();
+  try {
+    mkLedger(dir);
+    assert.throws(() => appendEvent(dir, verdict('evt-002', R1, {})), /verdict-unscoped: core-codex@codex:host owes M-A, M-B/);
+    assert.throws(() => appendEvent(dir, verdict('evt-003', R1, { measures: [] })), /verdict-unscoped/);
+    assert.deepEqual(readdirSync(join(dir, 'events')).filter(f => !f.startsWith('.tmp-')), ['evt-001.json']);
+    assert.equal(readdirSync(join(dir, 'events')).filter(f => f.startsWith('.tmp-')).length, 0, 'a refused write left a temp file');
+    // control: the scoped shape from the same reviewer is written
+    assert.equal(appendEvent(dir, verdict('evt-004', R1, { measures: ['M-A'] })).written, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('gate: a bare verdict from a participant who owes nothing is written', () => {
+  const dir = mkCollabDir();
+  try {
+    mkLedger(dir);
+    assert.equal(appendEvent(dir, verdict('evt-002', Q, {})).written, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('gate: a bare verdict into a legacy session (no measures) is written', () => {
+  const dir = mkCollabDir();
+  try {
+    mkLedger(dir, { measures: false });
+    assert.equal(appendEvent(dir, verdict('evt-002', R1, {})).written, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('gate: a non-solo kickoff without measures is refused; a solo one is written', () => {
+  const dir = mkCollabDir();
+  try {
+    const ko = (id, caps) => ({ event_id: id, ts: '2026-09-11T10:00:00.000Z', author: 'p@h:i', slug: 's', type: 'kickoff', references: [],
+      payload: { message: 'm', igm: { intention: 'i', goal: 'g', measure: 'x' }, capabilities_wanted: caps, wall_clock_hours: 24, transport: 'localhost' } });
+    assert.throws(() => appendEvent(dir, ko('evt-001', ['review'])), /completion-measures-required/);
+    assert.deepEqual(readdirSync(join(dir, 'events')), []);
+    assert.equal(appendEvent(dir, ko('evt-001', [])).written, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

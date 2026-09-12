@@ -15,37 +15,16 @@ import {
   deriveSlug, appendEvent, renderEventsJsonl,
   resolveIdentity, gitPullRebase, gitCommitPush, generatePin,
   assertSlugUnique, generateEventId, authorSlugFromTriplet,
+  PLACEHOLDER_MEASURE_RE, validateMeasures,
 } from './collab-event-helpers.mjs';
 import {
   parseTransport, isGitTransport, resolveTransportPaths,
   defaultTickIntervalMinutes, defaultRatificationWindowMinutes, preflightTransport,
 } from './transport.mjs';
 
-// A measure whose description is still the kickoff's inferred placeholder has no stated
-// completion condition and must not pass the declaration gate.
-export const PLACEHOLDER_MEASURE_RE = /^\(measure inferred/i;
-
-/**
- * Validate a declared measure list. Returns error strings in the shared vocabulary
- * (`completion-measure-placeholder: <id>`, `completion-measure-invalid: <id>`); empty when valid.
- */
-export function validateMeasures(measures) {
-  const errors = [];
-  const seen = new Set();
-  for (const m of measures) {
-    const id = typeof m?.id === 'string' && m.id.trim() ? m.id : null;
-    const tag = id ?? '(missing id)';
-    if (!id || typeof m.requires_review_from !== 'string' || !m.requires_review_from.trim()
-        || typeof m.description !== 'string' || !m.description.trim()) {
-      errors.push(`completion-measure-invalid: ${tag}`);
-      continue;
-    }
-    if (PLACEHOLDER_MEASURE_RE.test(m.description.trim())) errors.push(`completion-measure-placeholder: ${id}`);
-    if (seen.has(id)) errors.push(`completion-measure-invalid: ${id}`);
-    seen.add(id);
-  }
-  return errors;
-}
+// The measure validator lives with the other ledger semantics; re-exported so the CLI's
+// callers keep one import.
+export { PLACEHOLDER_MEASURE_RE, validateMeasures };
 
 /** `--measure "<id>|<description>|<participant-triplet>"` → measure object; throws on malformed input. */
 export function parseMeasureFlag(value) {

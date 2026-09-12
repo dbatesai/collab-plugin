@@ -18,7 +18,9 @@ import {
   findCollabAcrossTransports, readEvents, generateEventId, authorSlugFromTriplet, appendEvent,
   channelIdentity, hasJoinedIdentity, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
-  getJoinedAgents, unmetRequiredReviews,
+  getJoinedAgents, computeCloseOutcome, validateMeasures,
+  openRequests, waitCycles, effectiveDeadline, effectiveOnTimeout, executeTimeoutAction, isSystemTurn,
+  CHASE_FLOOD_LIMIT, OBLIGATION_GRACE_MS,
   gitPullRebase, gitCommitPush,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
@@ -55,13 +57,15 @@ export function detectRoute(events, triplet, nowTs) {
   // Treat objected propose-closes as dead (findActiveProposeClose semantics).
   // The ratStatus still reports them for visibility, but tick routing skips them.
   if (ratStatus && ratStatus.objected.length === 0) {
-    // A ratified completion measure with no review attached cannot be closed as success
-    // and cannot be waived by declaring the result degraded. The proposer closes at the
-    // authority boundary instead, naming what never arrived.
-    if (ratStatus.proposeClose.author === triplet && unmetRequiredReviews(events, nowTs).length > 0) {
-      return 'terminal:authority-boundary';
+    // A session with declared measures closes by its contract. Unless every measure carries
+    // a ratify from its named reviewer and the synthesis is ratified, the proposer closes at
+    // the authority boundary, naming what never arrived and what was objected to — success
+    // cannot be declared over a missing review, and degradation cannot waive one.
+    if (ratStatus.proposeClose.author === triplet) {
+      const contract = computeCloseOutcome(events, nowTs, { route: 'proposer' });
+      if (contract && contract.outcome !== 'converged') return 'terminal:authority-boundary';
+      if (ratStatus.converged) return 'emit-close';
     }
-    if (ratStatus.converged && ratStatus.proposeClose.author === triplet) return 'emit-close';
     if (ratStatus.proposeClose.author !== triplet && ratStatus.pending.includes(triplet)) return 'ratify-or-object';
   }
   return 'turn-or-propose';
@@ -121,47 +125,57 @@ export async function tickDeterministic(slug, options = {}) {
     return { action: 'exit', reason: 'closed', slug };
   }
 
+  // A declaration this plugin would not have written (a hand edit, an older writer) is
+  // refused once a second participant has joined it: there is no contract to compute an
+  // outcome from, and nothing here may guess one. Absent measures are the legacy shape.
+  const declared = events.find(e => e.type === 'kickoff')?.payload?.ratified_completion_measures;
+  if (Array.isArray(declared) && declared.length > 0) {
+    const errors = validateMeasures(declared);
+    const joiners = new Set(events.filter(e => e.type === 'join').map(e => e.author));
+    if (errors.length && joiners.size >= 2) {
+      return {
+        action: 'contract-invalid', errors, slug, triplet,
+        repair: 'close this session failed-safely and kick off again with valid --measure flags',
+      };
+    }
+  }
+
   if (route.startsWith('safety-net:')) {
     const net = route.split(':')[1];
     const outcomes = { 'wall-clock':'aborted-budget', 'stall':'aborted-stall', 'objection-deadlock':'aborted-objection' };
+    // The stall net on a session with declared measures closes by the same calculation the
+    // proposer route uses; `aborted-stall` is the legacy word for a ledger with no contract.
+    const contract = net === 'stall' ? computeCloseOutcome(events, nowTs, { route: 'stall' }) : null;
+    const payload = contract
+      ? { final_synthesis: `Safety net: ${net}`, outcome: contract.outcome, ...contract.receipt }
+      : { final_synthesis: `Safety net: ${net}`, outcome: outcomes[net] };
     const ev = {
       event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp, type: 'close', references: [],
-      payload: { final_synthesis: `Safety net: ${net}`, outcome: outcomes[net] },
+      payload,
     };
     if (!dryRun) {
       appendEvent(dir, ev);
       await render(slug, { collabDir: dir, author: triplet });
-      if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${outcomes[net]})`);
+      if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${payload.outcome})`);
     }
     return { action: 'close', reason: net, event: ev };
   }
 
   if (route === 'terminal:authority-boundary') {
     const rat = getRatificationStatus(events, nowTs);
-    const unmet = unmetRequiredReviews(events, nowTs);
+    const contract = computeCloseOutcome(events, nowTs, { route: 'proposer' });
     const ev = {
       event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp,
       type: 'close', references: [rat.proposeClose.event_id],
-      payload: {
-        final_synthesis: rat.proposeClose.payload.synthesis,
-        outcome: 'complete-to-authority-boundary',
-        // What did not arrive, named. A terminal record that does not say this is just
-        // a different word for the same silence.
-        unmet_ratified_measures: unmet,
-        missing_reviews_from: unmet.map(m => m.requires_review_from),
-        // Only real verdicts. Nothing here is inferred from silence.
-        ratified_by: rat.explicitRatified,
-        note: 'Closed at the authority boundary. Every ratified completion measure that has an '
-            + 'evidence receipt is included above; the reviews named in unmet_ratified_measures '
-            + 'never arrived and were not waived. This is not a consensus and must not be '
-            + 'described as one.',
-      },
+      // The receipt names what arrived, what was objected to, and what never came. A
+      // terminal record that does not say this is just a different word for the same silence.
+      payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: contract.outcome, ...contract.receipt },
     };
     if (!dryRun) {
       appendEvent(dir, ev);
       await render(slug, { collabDir: dir, author: triplet });
       if (isGitTransport(transport)) {
-        gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (complete-to-authority-boundary)`);
+        gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${contract.outcome})`);
       }
     }
     return { action: 'close', reason: 'authority-boundary', event: ev };
@@ -186,23 +200,34 @@ export async function tickDeterministic(slug, options = {}) {
   // Check per-participant obligations; emit chase events for missed + grace-elapsed
   // participants. Flood-limited to 3 chase events per participant per 60 minutes.
   const chaseEvents = [];
+  const timeoutActions = [];
   if (route === 'turn-or-propose') {
     const joined = getJoinedAgents(events);
     const nowDate = new Date(nowTs);
     for (const participant of joined) {
       if (participant === triplet) continue; // don't chase ourselves
-      const theirEvents = events.filter(e => e.author === participant && e.type === 'turn');
+      // The participant's latest substantive turn is their commitment: the deadline it
+      // declared, or its own timestamp plus one cadence. System turns commit nobody.
+      const theirEvents = events.filter(e => e.author === participant && e.type === 'turn' && !isSystemTurn(e));
       const last = theirEvents[theirEvents.length - 1];
-      if (!last?.payload?.next_update_by) continue; // no commitment → no chase
-      // Only chase on strict ISO 8601 deadlines — human-readable strings (e.g., '1:00 AM EDT')
-      // can be parsed by new Date() but are unreliable and represent the HC watcher interop bug.
-      // Skipping them here means non-ISO timestamps don't trigger spurious chases.
-      const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
-      if (!ISO_8601_RE.test(last.payload.next_update_by)) continue;
-      const deadline = new Date(last.payload.next_update_by);
-      const gracePeriodMs = 5 * 60 * 1000;
-      if (nowDate - deadline < gracePeriodMs) continue; // within grace → no chase yet
+      if (!last) continue;
+      const deadlineIso = effectiveDeadline(last, events);
+      const deadline = new Date(deadlineIso);
+      if (nowDate - deadline < OBLIGATION_GRACE_MS) continue; // within grace → no chase yet
       const driftSeconds = Math.round((nowDate - deadline) / 1000);
+
+      // The chase sequence for this deadline. Once it is exhausted the declared (or default)
+      // timeout action executes, once — chasing forever is the silent stall.
+      const chasesForDeadline = events.filter(e => isSystemTurn(e) && e.author === triplet
+        && (e.payload?.signals || []).includes('chase') && e.payload.signals.includes(participant)
+        && new Date(e.ts) > deadline).length;
+      if (chasesForDeadline >= CHASE_FLOOD_LIMIT) {
+        const action = effectiveOnTimeout(last);
+        const settled = events.some(e => e.type === 'timeout-action' && e.payload?.participant === participant
+          && Date.parse(e.payload?.for_deadline || 0) === deadline.getTime());
+        if (action && !settled) timeoutActions.push({ participant, action, for_deadline: deadlineIso, chases_so_far: chasesForDeadline });
+        continue;
+      }
 
       // Flood limit: count recent chase events targeting this participant in last 60 min
       const floodWindow = 60 * 60 * 1000;
@@ -224,12 +249,12 @@ export async function tickDeterministic(slug, options = {}) {
           intent: 'clarify', state: 'blocked',  // obligation-missed → blocked on other participant
           owner: participant, waiting_on: participant,
           next_update_by: '', // HK has no commitment here — chase is a system event
-          body: `Obligation missed: ${participant} expected update by ${localTimeStr(last.payload.next_update_by)}. ` +
+          body: `Obligation missed: ${participant} expected update by ${localTimeStr(deadlineIso)}. ` +
                 `Drift: ${Math.round(driftSeconds / 60)} min. State unknown.`,
           participant_obligation: {
             participant, drift_seconds: driftSeconds,
-            last_committed_next_update_by: last.payload.next_update_by,
-            commitment_drift_state: driftSeconds > gracePeriodMs / 1000 ? 'missed' : 'late',
+            last_committed_next_update_by: deadlineIso,
+            commitment_drift_state: driftSeconds > OBLIGATION_GRACE_MS / 1000 ? 'missed' : 'late',
           },
           signals: ['chase', 'obligation-missed', participant],
           provenance: {
@@ -249,10 +274,41 @@ export async function tickDeterministic(slug, options = {}) {
         gitCommitPush(dir, transport, `[${triplet}] chase: ${chaseEvents.length} obligation(s) missed ${slug}`);
       }
     }
+    if (!dryRun) for (const item of timeoutActions) executeTimeoutAction(dir, item, triplet);
+  }
+
+  // Requests you can see: what others are waiting on you for, and any pair waiting on each
+  // other. A new pair is recorded once, as a system turn keyed by its two request ids, so the
+  // ledger shows the cycle without a notice on every tick.
+  const current = dryRun ? events : readEvents(dir);
+  const open_requests = openRequests(current, triplet);
+  const wait_cycles = waitCycles(current);
+  const recorded = new Set(current.filter(e => isSystemTurn(e) && e.payload?.wait_cycle?.key).map(e => e.payload.wait_cycle.key));
+  const newCycles = wait_cycles.filter(c => !recorded.has(c.key) && c.participants.includes(triplet));
+  if (!dryRun && newCycles.length > 0) {
+    for (const c of newCycles) {
+      const other = c.participants.find(p => p !== triplet);
+      appendEvent(dir, {
+        event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp,
+        type: 'turn', references: c.requests,
+        payload: {
+          schema_version: '1.0', intent: 'clarify', state: 'blocked', owner: triplet, waiting_on: null, next_update_by: '',
+          body: `Wait cycle: ${triplet} is waiting on ${other} (${c.requests[0]}) while ${other} is waiting on ${triplet} (${c.requests[1]}). ` +
+                'One side has to accept, decline, or deliver; the requester\'s timeout fallback lapses the request otherwise.',
+          wait_cycle: { key: c.key, participants: c.participants, requests: c.requests },
+          signals: ['wait-cycle', ...c.participants],
+        },
+      });
+    }
+    if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] wait-cycle: ${newCycles.length} pair(s) ${slug}`);
   }
 
   // LLM-decision routes: return a hint, let the agent take over
-  return { action: 'agent-decision-needed', route, triplet, slug, chase_events_emitted: chaseEvents.length };
+  return {
+    action: 'agent-decision-needed', route, triplet, slug,
+    chase_events_emitted: chaseEvents.length, timeout_actions_executed: dryRun ? 0 : timeoutActions.length,
+    open_requests, wait_cycles,
+  };
 }
 
 export function main(argv) {

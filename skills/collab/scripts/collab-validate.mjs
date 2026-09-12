@@ -4,8 +4,7 @@
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { findCollabDir, readEvents } from './collab-event-helpers.mjs';
-import { validateMeasures } from './collab-kickoff.mjs';
+import { findCollabDir, readEvents, validateMeasures } from './collab-event-helpers.mjs';
 
 // Participant-authored types, then the three the system writes for itself:
 // `reconciled` on a healed foreign surface, `quarantined` on a rejected v1 event,

@@ -11,7 +11,7 @@ import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
   checkSafetyNets, gitCommitPush, authorSlugFromTriplet, reconcileForeignSurface,
-  renderEventsJsonl,
+  renderEventsJsonl, measureVerdicts, openRequests,
   STALL_TICKS, TICK_INTERVAL_MS,
 } from './collab-event-helpers.mjs';
 import { isGitTransport } from './transport.mjs';
@@ -29,6 +29,16 @@ export function buildStatusMd(events, slug) {
 
   const lines = [`# STATUS — ${slug}`, '', `## Current state: ${state}`, ''];
 
+  // A close with a contract receipt says what arrived, what was objected to, what never came.
+  const cp = closeEvt?.payload;
+  if (cp && Array.isArray(cp.unmet_ratified_measures)) {
+    const idsOf = (l) => (l || []).map(m => m.id).join(', ') || 'none';
+    lines.push(`Ratified: ${idsOf(cp.ratified_measures)}`, `Objected: ${idsOf(cp.objected_measures)}`,
+      `Unmet: ${idsOf(cp.unmet_ratified_measures)}`, `Missing reviews from: ${(cp.missing_reviews_from || []).join(', ') || 'none'}`);
+    if (cp.note) lines.push('', cp.note);
+    lines.push('');
+  }
+
   if (kickoff?.payload?.igm) {
     const { intention, goal, measure } = kickoff.payload.igm;
     lines.push('## IGM', `**Intention:** ${intention}`, `**Goal:** ${goal}`, `**Measure:** ${measure}`, '');
@@ -44,6 +54,28 @@ export function buildStatusMd(events, slug) {
     }
   }
   lines.push('');
+
+  // Declared measures and how each credit was read: `scoped` names the ids it judges,
+  // `legacy` is a bare verdict from the named reviewer read author-wide, as 1.1.0 did.
+  const verdicts = measureVerdicts(events);
+  if (verdicts.size) {
+    lines.push('## Measures', '| Measure | Reviewer | State | Scope | Note |', '|---|---|---|---|---|');
+    for (const v of verdicts.values()) {
+      const o = v.objected[0], r = v.ratified[0];
+      const [st, scope, note] = o ? ['objected', o.scope, o.reason || ''] : r ? ['ratified', r.scope, ''] : ['unmet', '—', ''];
+      lines.push(`| ${v.measure.id} | ${v.measure.requires_review_from} | ${st} | ${scope} | ${note} |`);
+    }
+    lines.push('');
+  }
+
+  // Open requests, by recipient: who is waiting on whom, since when, until when, and the
+  // requester's fallback when the deadline passes.
+  const waiting = joined.flatMap(a => openRequests(events, a));
+  if (waiting.length) {
+    lines.push('## Waiting', '| Request | Who → whom | Since | Deadline | Fallback | State |', '|---|---|---|---|---|---|');
+    for (const r of waiting) lines.push(`| ${r.request_id} | ${r.from} → ${r.to} | ${r.ts} | ${r.deadline} | ${r.on_timeout} | ${r.state} |`);
+    lines.push('');
+  }
 
   lines.push('## Recent activity (last 5)');
   for (const e of events.slice(-5).reverse()) lines.push(`- **${e.ts}** [${e.type}] ${e.author}`);

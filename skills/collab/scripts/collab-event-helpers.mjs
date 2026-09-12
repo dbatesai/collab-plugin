@@ -261,7 +261,59 @@ export function readEvents(collabDir) {
 // to write. The first append would otherwise strand all prior JSONL events behind
 // the new events/ directory (which readEvents prefers when present). Surfacing
 // the conflict loudly is the right move per spec §9.6 (read-only compat).
+// A measure whose description is still the kickoff's inferred placeholder has no stated
+// completion condition and must not pass the declaration gate.
+export const PLACEHOLDER_MEASURE_RE = /^\(measure inferred/i;
+
+/**
+ * Validate a declared measure list. Returns error strings in the shared vocabulary
+ * (`completion-measure-placeholder: <id>`, `completion-measure-invalid: <id>`); empty when valid.
+ */
+export function validateMeasures(measures) {
+  const errors = [];
+  const seen = new Set();
+  for (const m of measures) {
+    const id = typeof m?.id === 'string' && m.id.trim() ? m.id : null;
+    const tag = id ?? '(missing id)';
+    if (!id || typeof m.requires_review_from !== 'string' || !m.requires_review_from.trim()
+        || typeof m.description !== 'string' || !m.description.trim()) {
+      errors.push(`completion-measure-invalid: ${tag}`);
+      continue;
+    }
+    if (PLACEHOLDER_MEASURE_RE.test(m.description.trim())) errors.push(`completion-measure-placeholder: ${id}`);
+    if (seen.has(id)) errors.push(`completion-measure-invalid: ${id}`);
+    seen.add(id);
+  }
+  return errors;
+}
+
+/**
+ * The writer gate: what this plugin refuses to emit. A non-solo kickoff must declare valid
+ * measures; a verdict from a reviewer the ledger names must say which measures it judges.
+ * Returns an error string, or null. Reads the ledger only for the two verdict types.
+ */
+function writerGateError(collabDir, event) {
+  if (event.type === 'kickoff') {
+    const p = event.payload || {};
+    const nonSolo = Array.isArray(p.capabilities_wanted) && p.capabilities_wanted.length > 0;
+    const ms = p.ratified_completion_measures;
+    if (nonSolo && (!Array.isArray(ms) || ms.length === 0)) {
+      return 'completion-measures-required: a kickoff that wants other participants must declare at least one measure';
+    }
+    if (Array.isArray(ms)) { const errs = validateMeasures(ms); if (errs.length) return errs.join('; '); }
+    return null;
+  }
+  if (event.type !== 'ratify' && event.type !== 'object') return null;
+  const owed = declaredMeasures(readEvents(collabDir)).filter(m => m.requires_review_from === event.author).map(m => m.id);
+  if (owed.length === 0) return null;
+  const ids = event.payload?.measures;
+  if (Array.isArray(ids) && ids.length > 0) return null;
+  return `verdict-unscoped: ${event.author} owes ${owed.join(', ')}; a verdict from a named reviewer must list the measures it discharges`;
+}
+
 export function appendEvent(collabDir, event) {
+  const gate = writerGateError(collabDir, event);
+  if (gate) throw new Error(gate);
   const eventsDir = join(collabDir, 'events');
   const jsonlPath = join(collabDir, 'events.jsonl');
   if (!existsSync(eventsDir) && existsSync(jsonlPath)) {
@@ -477,7 +529,11 @@ export const NO_PROGRESS_WINDOW_MS = 10 * 60 * 1000;
 export const VALID_TIMEOUT_ACTIONS = ['proceed-alone', 'reassign', 'degrade-and-continue', 'close-degraded'];
 
 const ISO_RE_OBL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
-const isChase = (e) => e.type === 'turn' && (e.payload?.intent === 'chase' || (e.payload?.signals || []).includes('chase'));
+// Turns the system writes about the session — chases and wait-cycle notices. They commit
+// their author to nothing and request nothing.
+export const isSystemTurn = (e) => e.type === 'turn'
+  && (e.payload?.intent === 'chase' || ['chase', 'wait-cycle'].some(s => (e.payload?.signals || []).includes(s)));
+const isChase = isSystemTurn;
 
 // Bookkeeping the system emits about itself. None of it advances the goal, so none of it
 // counts as progress.
