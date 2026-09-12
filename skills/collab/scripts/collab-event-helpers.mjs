@@ -520,7 +520,7 @@ export function reconcileForeignSurface(collabDir, author) {
 //
 // Refuses when events.jsonl holds events canonical does not, since rendering would destroy
 // them. The guard is at the writer boundary so every caller inherits it; reconcile first.
-export function renderEventsJsonl(collabDir, { include } = {}) {
+export function renderEventsJsonl(collabDir, { include, events: given } = {}) {
   const { foreign } = foreignSurfaceEvents(collabDir);
   if (foreign.length > 0) {
     const err = new Error(
@@ -532,9 +532,10 @@ export function renderEventsJsonl(collabDir, { include } = {}) {
     err.foreignIds = foreign.map(e => e.event_id);
     throw err;
   }
-  // `include` narrows the render to events the caller may publish; a derived file must not
-  // carry what its raw inputs may not.
-  const events = readEvents(collabDir).filter(e => !include || include(e));
+  // `events` is the caller's already-resolved input set (published representations in place
+  // of conflicting local ones); `include` narrows a fresh read. A derived file must not carry
+  // what its raw inputs may not, and must not lose what is already published.
+  const events = given ?? readEvents(collabDir).filter(e => !include || include(e));
   const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
   writeFileSync(join(collabDir, 'events.jsonl'), content);
   return content;
@@ -1314,6 +1315,36 @@ export function gitBlobText(transport, blob) {
   return runGit(repoForTransport(transport), ['cat-file', '-p', blob]).stdout;
 }
 
+/**
+ * Events the upstream publishes only as lines of `events.jsonl` (a legacy writer's footprint):
+ * event id → the parsed object and its canonical string. A local file that carries one of these
+ * ids with different content is a conflict between two representations of one published event.
+ */
+export function gitUpstreamJsonl(collabDir, transport, upstream = gitUpstreamBlobs(collabDir, transport)) {
+  const out = new Map();
+  if (!upstream.has('events.jsonl')) return out;
+  for (const line of gitBlobText(transport, upstream.get('events.jsonl')).split('\n')) {
+    if (!line.trim()) continue;
+    try { const o = JSON.parse(line); if (o?.event_id) out.set(o.event_id, { event: o, canonical: JSON.stringify(o) }); } catch { /* not an event line */ }
+  }
+  return out;
+}
+
+/** Files under events/ that are not `<event_id>.json` for the event they contain — never read as events. */
+export function eventFilenameViolations(collabDir) {
+  const eventsDir = join(collabDir, 'events');
+  if (!existsSync(eventsDir)) return [];
+  const out = [];
+  for (const name of readdirSync(eventsDir)) {
+    if (!name.endsWith('.json') || name.startsWith('.')) continue;
+    try {
+      const e = JSON.parse(readFileSync(join(eventsDir, name), 'utf8'));
+      if (e && typeof e === 'object' && e.event_id && name !== `${e.event_id}.json`) out.push(join('events', name));
+    } catch { /* unreadable: not an event, not a violation of this rule */ }
+  }
+  return out.sort();
+}
+
 /** Channel-relative path → blob id for everything the upstream branch holds under the channel. */
 export function gitUpstreamBlobs(collabDir, transport) {
   const repo = repoForTransport(transport);
@@ -1350,11 +1381,19 @@ export function deliverChannel(collabDir, transport, author, message, owner = `p
   const eventsRel = join(rel, 'events');
   const manifest = readDeliveryManifest(collabDir, author);
   const recorded = (path, hash) => isRecordedArtifact(manifest, relative(rel, path), hash);
+  const upstreamJsonl = gitUpstreamJsonl(collabDir, transport);
+  // A new event file is this participant's only if its author is, AND its id is not already
+  // published in another representation with different content — a file that contradicts a
+  // published JSONL line is a conflict, not a new event, whoever wrote it.
   const isOwnedEvent = (path, text) => {
     const base = basename(path);
     if (dirname(path) !== eventsRel || !base.endsWith('.json') || base.startsWith('.')) return false;
-    try { const e = JSON.parse(text); return e?.event_id === base.slice(0, -5) && e?.author === author; }
-    catch { return false; }
+    try {
+      const e = JSON.parse(text);
+      if (e?.event_id !== base.slice(0, -5) || e?.author !== author) return false;
+      const published = upstreamJsonl.get(e.event_id);
+      return !published || published.canonical === JSON.stringify(e);
+    } catch { return false; }
   };
   const inChannel = (p) => p === rel || p.startsWith(rel + '/');
 

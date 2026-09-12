@@ -151,6 +151,15 @@ The sixth-pass controls pass for Hale, including his own withdrawal-and-second-t
 
 Mutation controls: M22 (reader accepts filename/id mismatch), M23 (legacy JSONL line not an input); M19/M21 retargeted.
 
+## Round 3, eighth pass — Hale's review of `1aa924b` (`hale-to-muse-seventh-candidate-legacy-conflicts-2026-09-11-8969847.md`) and David's filename ruling (`muse-to-all-david-safest-option-2026-09-11.md`)
+
+The shadow and legacy-JSONL controls pass for Hale; M22/M23 verified independently. Two new conflict failures plus a ruling, all red first (4 fail / 22 in `test-collab-git-delivery.mjs`), green after.
+
+- **David's call: fatal block on filename violations.** Implemented as a hard stop at the point where anything could happen: `eventFilenameViolations(collabDir)` lists files under `events/` not named `<event_id>.json`; the tick returns `{ action: 'refused', reason: 'event-filename-violation', paths, repair }` before reading the ledger for routing — nothing appended, derived, or published; `validateEvents(events, { collabDir })` reports each as an error. `readEvents` keeps warning-and-skipping so `status`/`list` can still show a person the channel. Hale's position (warning + exclusion + preservation suffices at the publication boundary) is recorded as dissent; David's ruling governs. The shadow test now asserts the refusal.
+- **One published identity, two representations.** A local `events/<id>.json` that contradicts an event published only as an upstream `events.jsonl` line was admitted as a new event (own author) or excluded so that the published line vanished from the derived file (peer). Now: `gitUpstreamJsonl` exposes the upstream's line-published events; the render resolves each local event against both published representations and, on any contradiction, derives from the *published* one (file blob or line), records `{ event_id, path, reason }` in `render_conflicts`, and leaves the local bytes untouched; published events with no local representation are still included. `deliverChannel` no longer owns a new event file whose id is line-published with different content. Tests: own-author and peer JSONL conflicts (nothing of the edit on the remote, published line retained, local bytes preserved, conflict reported, raw file listed foreign); unchanged legacy migration (identical file → not a conflict, delivered); and the edited published *file* case now also keeps the published turn in the derived file.
+
+Mutation controls: M23 retargeted (contradicting line taken as the event), M24 (conflict excluded rather than resolved — published content erased), M25 (tick no longer refuses on a filename violation), M26 (delivery owns a file that contradicts a published line).
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

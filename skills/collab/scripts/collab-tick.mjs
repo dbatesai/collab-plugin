@@ -21,7 +21,7 @@ import {
   getJoinedAgents, computeCloseOutcome, validateMeasures,
   openRequests, waitCycles, evaluateObligations, executeTimeoutAction, isSystemTurn,
   OBLIGATION_GRACE_MS,
-  gitPullRebase, deliverChannel,
+  gitPullRebase, deliverChannel, eventFilenameViolations,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
 } from './collab-event-helpers.mjs';
@@ -97,6 +97,16 @@ export async function tickDeterministic(slug, options = {}) {
     : channelIdentity(readEvents(dir), workspaceId);
   const triplet = identity.triplet;
   if (!dryRun) quarantineInvalidV1Events(dir, { author: triplet });
+  // A file under events/ whose name is not its event id is a hard stop, not a warning: nothing
+  // is read as that event, nothing is appended, derived, or published until it is removed or
+  // renamed by whoever put it there. (David's call: the safest option.)
+  const violations = eventFilenameViolations(dir);
+  if (violations.length) {
+    return {
+      action: 'refused', reason: 'event-filename-violation', slug, paths: violations,
+      repair: 'a file under events/ is not named for the event it contains; rename it to <event_id>.json if it is a real event, or move it out of events/ — the tick will not proceed while it is there',
+    };
+  }
   const events = readEvents(dir);
   const transport = transportFromEvents(events);
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
@@ -162,7 +172,7 @@ export async function tickDeterministic(slug, options = {}) {
       rendered = await render(slug, { collabDir: dir, author: triplet, publish: false });
       if (isGitTransport(transport)) delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (${payload.outcome})`);
     }
-    return { action: 'close', reason: net, event: ev, delivery, render_blocked: rendered?.blocked ?? null };
+    return { action: 'close', reason: net, event: ev, delivery, render_blocked: rendered?.blocked ?? null, render_conflicts: rendered?.conflicts ?? [] };
   }
 
   if (route === 'terminal:authority-boundary') {
@@ -183,7 +193,7 @@ export async function tickDeterministic(slug, options = {}) {
         delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (${contract.outcome})`);
       }
     }
-    return { action: 'close', reason: 'authority-boundary', event: ev, delivery, render_blocked: rendered?.blocked ?? null };
+    return { action: 'close', reason: 'authority-boundary', event: ev, delivery, render_blocked: rendered?.blocked ?? null, render_conflicts: rendered?.conflicts ?? [] };
   }
 
   if (route === 'emit-close') {
@@ -199,7 +209,7 @@ export async function tickDeterministic(slug, options = {}) {
       rendered = await render(slug, { collabDir: dir, author: triplet, publish: false });
       if (isGitTransport(transport)) delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (converged)`);
     }
-    return { action: 'close', reason: 'converged', event: ev, delivery, render_blocked: rendered?.blocked ?? null };
+    return { action: 'close', reason: 'converged', event: ev, delivery, render_blocked: rendered?.blocked ?? null, render_conflicts: rendered?.conflicts ?? [] };
   }
 
   // v1.0 #6: deterministic chase emission before handing off to LLM.

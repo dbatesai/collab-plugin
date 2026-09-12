@@ -4,7 +4,7 @@
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { findCollabDir, readEvents, validateMeasures } from './collab-event-helpers.mjs';
+import { findCollabDir, readEvents, validateMeasures, eventFilenameViolations } from './collab-event-helpers.mjs';
 
 // Participant-authored types, then the three the system writes for itself:
 // `reconciled` on a healed foreign surface, `quarantined` on a rejected v1 event,
@@ -27,8 +27,9 @@ const REQUIRED_PAYLOAD = {
   ratify: [], object: ['reason'], withdraw: [], close: ['final_synthesis','outcome'],
 };
 
-export function validateEvents(events) {
+export function validateEvents(events, { collabDir } = {}) {
   const errors = [], warnings = [], seenIds = new Set();
+  if (collabDir) for (const p of eventFilenameViolations(collabDir)) errors.push(`event-filename-violation: ${p} is not named for the event it contains`);
   // Eligibility v1 state, in ledger order. `declared` is the kickoff's measure list; `judged`
   // records only SCOPED verdicts per author, so a legacy ledger (bare verdicts) can never
   // produce a new error here — interpret by shape, guarantee at write.
@@ -151,7 +152,7 @@ export function main(argv) {
   if (!slug) { process.stderr.write('usage: collab-validate.mjs <slug>\n'); return 2; }
   const dir = findCollabDir(slug);
   if (!dir) { process.stderr.write(`no collab found: ${slug}\n`); return 2; }
-  const result = validateEvents(readEvents(dir));
+  const result = validateEvents(readEvents(dir), { collabDir: dir });
   if (result.warnings.length) process.stderr.write('Warnings:\n' + result.warnings.map(w => '  '+w).join('\n') + '\n');
   if (result.errors.length) { process.stderr.write('Errors:\n' + result.errors.map(e => '  '+e).join('\n') + '\n'); return 1; }
   process.stdout.write(`OK — ${readEvents(dir).length} events valid\n`);

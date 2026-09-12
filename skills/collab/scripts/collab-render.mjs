@@ -11,7 +11,7 @@ import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
   checkSafetyNets, deliverChannel, recordOwnedArtifact, readDeliveryManifest, isRecordedArtifact, gitBlobHash, gitUpstreamBlobs, gitBlobText,
-  EVENT_SOURCE,
+  gitUpstreamJsonl, EVENT_SOURCE,
   authorSlugFromTriplet, reconcileForeignSurface,
   renderEventsJsonl, measureVerdicts, openRequests,
   STALL_TICKS, TICK_INTERVAL_MS,
@@ -157,22 +157,36 @@ export async function render(slug, options = {}) {
   // rewriting). An event published only as a line of the upstream's events.jsonl (a legacy
   // writer) counts if it is that line, canonically. Anything else counts only if this
   // participant wrote it.
-  const upstreamJsonl = new Map();
-  if (bounded && upstream.has('events.jsonl')) {
-    for (const line of gitBlobText(transport, upstream.get('events.jsonl')).split('\n')) {
-      if (!line.trim()) continue;
-      try { const o = JSON.parse(line); if (o?.event_id) upstreamJsonl.set(o.event_id, JSON.stringify(o)); } catch { /* not an event line */ }
-    }
-  }
-  const publishable = (e) => {
-    if (!bounded) return true;
+  // One published identity may have two representations — an upstream event file, an upstream
+  // events.jsonl line — and a local file may contradict either. A contradiction is a conflict:
+  // the render derives from the PUBLISHED representation, so published content is never erased
+  // and local edits never travel; the local bytes stay on disk and the conflict is reported.
+  const upstreamJsonl = bounded ? gitUpstreamJsonl(dir, transport, upstream) : new Map();
+  const conflicts = [];
+  const resolve = (e) => {                        // → the event to render from, or null to exclude
+    if (!bounded) return e;
     const src = e[EVENT_SOURCE];
-    if (!src) return false;
-    if (src.hash && upstream.has(src.path)) return src.hash === upstream.get(src.path);
-    if (upstreamJsonl.get(e.event_id) === JSON.stringify(e)) return true;
-    return !upstream.has(src.path) && e.author === author;
+    if (!src) return null;
+    if (src.hash && upstream.has(src.path)) {
+      if (src.hash === upstream.get(src.path)) return e;
+      conflicts.push({ event_id: e.event_id, path: src.path, reason: 'local file differs from the published file' });
+      try { return JSON.parse(gitBlobText(transport, upstream.get(src.path))); } catch { return null; }
+    }
+    const line = upstreamJsonl.get(e.event_id);
+    if (line) {
+      if (line.canonical === JSON.stringify(e)) return e;
+      conflicts.push({ event_id: e.event_id, path: src.path, reason: 'local file differs from the published events.jsonl line' });
+      return line.event;
+    }
+    return e.author === author ? e : null;
   };
-  const events = all.filter(publishable);
+  const events = all.map(resolve).filter(Boolean);
+  // Published events with no local representation at all (a legacy line reconcile did not
+  // import, a file deleted locally) still belong in the derived files.
+  const have = new Set(events.map(e => e.event_id));
+  for (const [id, { event }] of upstreamJsonl) if (!have.has(id)) { events.push(event); have.add(id); }
+  events.sort((x, y) => (x.ts !== y.ts ? (x.ts < y.ts ? -1 : 1) : (x.event_id < y.event_id ? -1 : 1)));
+  const publishable = (e) => have.has(e.event_id) && events.some(x => x.event_id === e.event_id && JSON.stringify(x) === JSON.stringify(e));
   const preserved = [];
   const mayReplace = (relPath) => {
     const p = join(dir, relPath);
@@ -195,16 +209,16 @@ export async function render(slug, options = {}) {
   }
 
   if (mayReplace('events.jsonl')) {
-    const content = renderEventsJsonl(dir, { include: publishable });
+    const content = renderEventsJsonl(dir, { events: bounded ? events : undefined, include: publishable });
     if (author) recordOwnedArtifact(dir, author, 'events.jsonl', content);
   } else preserved.push('events.jsonl');
 
   const blocked = preserved.length ? { reason: 'unrecorded-existing-files', paths: preserved } : null;
   if (!dryRun && publish && author && isGitTransport(transport)) {
     const last = events[events.length - 1];
-    return { blocked, delivery: deliverChannel(dir, transport, author, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`) };
+    return { blocked, conflicts, delivery: deliverChannel(dir, transport, author, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`) };
   }
-  return { blocked, delivery: null };
+  return { blocked, conflicts, delivery: null };
 }
 
 export function main(argv) {

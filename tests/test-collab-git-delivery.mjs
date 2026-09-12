@@ -23,7 +23,8 @@ process.env.COLLAB_LOCAL_ROOT = join(BASE, 'local');            // the ownership
 mkdirSync(process.env.COLLAB_REPOS_ROOT, { recursive: true });
 
 // Roots are read at import time in places, so import after the env is set.
-const { appendEvent, readEvents, deliveryManifestPath } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
+const { appendEvent, readEvents, deliveryManifestPath, eventFilenameViolations } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
+const { validateEvents } = await import('../skills/collab/scripts/collab-validate.mjs');
 const { render } = await import('../skills/collab/scripts/collab-render.mjs');
 const { tickDeterministic } = await import('../skills/collab/scripts/collab-tick.mjs');
 
@@ -474,13 +475,14 @@ test('git/delivery: an edited published event by the ticking participant is not 
   assert.ok(readFileSync(p, 'utf8').includes(MARK), 'the edit was reverted instead of preserved');
 });
 
-test('git/delivery: an alternate file borrowing a published event\'s id is not that event — the reader binds bytes, path, and id, and derived files carry only the published bytes (R3-H4)', async () => {
+test('git/delivery: an alternate file borrowing a published event\'s id is not that event — the reader returns the published bytes, and the tick REFUSES (David: fatal block on filename violations)', async () => {
   const slug = 'git-delivery-shadow-file';
   const T0 = Date.now() - 40 * MIN;
   const ch = mkGitChannel(slug, T0);
   const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
   ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
   sync(ch, 'peer turn and proposal');
+  const before = ch.remoteCommits();
   const MARK = 'ZZ-SHADOW-MARKER-a91d';
   const shadow = JSON.parse(readFileSync(join(ch.dir, 'events', `${peer.event_id}.json`), 'utf8'));
   shadow.payload.body = `shadow body ${MARK}`;
@@ -489,17 +491,16 @@ test('git/delivery: an alternate file borrowing a published event\'s id is not t
   const seen = readEvents(ch.dir).find(e => e.event_id === peer.event_id);
   assert.equal(seen.payload.body, 'published peer critique', 'the reader took the alternate file\'s bytes for a published id');
   assert.equal(readEvents(ch.dir).filter(e => e.event_id === peer.event_id).length, 1);
+  assert.deepEqual(eventFilenameViolations(ch.dir), ['events/000-shadow.json']);
 
   const r = await tick(slug);
-  assert.equal(r.action, 'close');
-  assert.ok(!readFileSync(join(ch.dir, 'events.jsonl'), 'utf8').includes(MARK), 'the shadow bytes were derived locally');
-  for (const f of ch.remoteFiles().filter(f => f.includes(`2026-09-11-${slug}/`))) {
-    assert.ok(!(remoteShow(slug, f) || '').includes(MARK), `the shadow bytes reached the remote through ${f}`);
-  }
-  assert.ok(remoteText(slug, `events/${peer.event_id}.json`), 'the canonical peer event should still be on the remote');
-  assert.ok(remoteText(slug, 'events.jsonl').includes('published peer critique'), 'the published peer event was dropped from the derived file');
+  assert.equal(r.action, 'refused', 'a filename violation in events/ must be a hard stop');
+  assert.equal(r.reason, 'event-filename-violation');
+  assert.deepEqual(r.paths, ['events/000-shadow.json']);
+  assert.ok(!readEvents(ch.dir).some(e => e.type === 'close'), 'the refused tick appended a close');
+  assert.equal(ch.remoteCommits(), before, 'the refused tick published something');
   assert.equal(readFileSync(join(ch.dir, 'events', '000-shadow.json'), 'utf8'), shadowRaw, 'the foreign bytes were not preserved');
-  assert.ok(r.delivery.foreign_paths.some(p => p.endsWith('000-shadow.json')));
+  assert.ok(validateEvents(readEvents(ch.dir), { collabDir: ch.dir }).errors.some(e => /event-filename-violation.*000-shadow\.json/.test(e)), 'validate did not report the violation');
 });
 
 test('git/delivery: a peer event published only as a legacy events.jsonl line is still in the rendered events.jsonl the close delivers', async () => {
@@ -517,6 +518,81 @@ test('git/delivery: a peer event published only as a legacy events.jsonl line is
   assert.equal(r.action, 'close');
   assert.ok((remoteText(slug, 'events.jsonl') || '').includes('legacy peer critique'), 'a published legacy peer event was removed from the derived file on the remote');
   assert.ok(r.delivery.verified);
+});
+
+// ------------------------------------------------------------ one published identity, two representations (R3-H4, eighth pass)
+
+/** Publish `line` as a line of upstream events.jsonl only — the legacy JSONL-only writer's footprint. */
+function publishJsonlLine(ch, line) {
+  const events = readEvents(ch.dir);
+  writeFileSync(join(ch.dir, 'events.jsonl'), [...events, line].map(e => JSON.stringify(e)).join('\n') + '\n');
+  sync(ch, 'legacy jsonl line');
+}
+const legacyTurn = (slug, T0, author, body) => ({ event_id: 'evt-legacy-x', ts: iso(T0 + 12 * MIN), author, slug, type: 'turn', references: [],
+  payload: { intent: 'critique', body, signals: [] } });
+
+for (const [who, author] of [['own-author', ME], ['peer'], ]) {
+  const a = author || R1;
+  test(`git/delivery: a local file that contradicts an event published only as a JSONL line (${who}) is a conflict — published content is kept, local bytes preserved, nothing of the edit delivered (R3-H4)`, async () => {
+    const slug = `git-delivery-jsonl-conflict-${who}`;
+    const T0 = Date.now() - 40 * MIN;
+    const ch = mkGitChannel(slug, T0);
+    ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+    sync(ch, 'proposal');
+    const line = legacyTurn(slug, T0, a, 'published only as a jsonl line');
+    publishJsonlLine(ch, line);
+    assert.ok((remoteText(slug, 'events.jsonl') || '').includes('published only as a jsonl line'), 'setup: the line must be published');
+    const MARK = `ZZ-JSONL-CONFLICT-${who}-5e2c`;
+    const local = { ...line, payload: { ...line.payload, body: `rewritten locally ${MARK}` } };
+    const localRaw = JSON.stringify(local, null, 2);
+    writeFileSync(join(ch.dir, 'events', `${line.event_id}.json`), localRaw);      // same id, different content, no upstream file
+
+    const r = await tick(slug);
+    assert.equal(r.action, 'close');
+    for (const f of ch.remoteFiles().filter(f => f.includes(`2026-09-11-${slug}/`))) {
+      assert.ok(!(remoteShow(slug, f) || '').includes(MARK), `the local edit reached the remote through ${f}`);
+    }
+    assert.ok(!ch.remoteFiles().some(f => f.endsWith(`events/${line.event_id}.json`)), 'the conflicting raw file was delivered');
+    assert.ok((remoteText(slug, 'events.jsonl') || '').includes('published only as a jsonl line'), 'the published line was erased from the derived file');
+    assert.equal(readFileSync(join(ch.dir, 'events', `${line.event_id}.json`), 'utf8'), localRaw, 'the local conflicting bytes were not preserved');
+    assert.ok(r.render_conflicts?.some(c => c.event_id === line.event_id), 'the conflict was not reported');
+    assert.ok(r.delivery.foreign_paths.some(p => p.endsWith(`events/${line.event_id}.json`)), 'the conflicting file was not listed as not-ours');
+  });
+}
+
+test('git/delivery: an unchanged legacy migration — a local file identical to the published JSONL line — is not a conflict and is delivered', async () => {
+  const slug = 'git-delivery-jsonl-migration';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'proposal');
+  const line = legacyTurn(slug, T0, ME, 'my legacy line, migrated unchanged');
+  publishJsonlLine(ch, line);
+  writeFileSync(join(ch.dir, 'events', `${line.event_id}.json`), JSON.stringify(line, null, 2));   // identical content, now as a file
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.deepEqual(r.render_conflicts ?? [], []);
+  assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${line.event_id}.json`)), 'the unchanged migration was not delivered');
+  assert.ok((remoteText(slug, 'events.jsonl') || '').includes('my legacy line, migrated unchanged'));
+});
+
+test('git/delivery: an edited published peer FILE also keeps the published content in derived files while the edit is preserved locally', async () => {
+  const slug = 'git-delivery-edited-file-preserves-published';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'peer turn and proposal');
+  const p = join(ch.dir, 'events', `${peer.event_id}.json`);
+  const edited = readFileSync(p, 'utf8').replace('published peer critique', 'rewritten ZZ-EDITED-FILE-9a3f');
+  writeFileSync(p, edited);
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.equal(r.delivery.blocked?.reason, 'modified-tracked-files');
+  assert.ok(readFileSync(join(ch.dir, 'events.jsonl'), 'utf8').includes('published peer critique'), 'the published turn was erased from the derived file');
+  assert.ok(!readFileSync(join(ch.dir, 'events.jsonl'), 'utf8').includes('ZZ-EDITED-FILE'));
+  assert.equal(readFileSync(p, 'utf8'), edited, 'the edit was not preserved');
+  assert.ok(r.render_conflicts?.some(c => c.event_id === peer.event_id));
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));
