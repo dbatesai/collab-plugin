@@ -1,0 +1,40 @@
+{
+  "computed_at": "3b97ac6",
+  "unmet": [],
+  "route": "safety-net:stall",
+  "ratification": {
+    "proposeClose": {
+      "event_id": "evt-006",
+      "ts": "2026-08-01T10:20:00.000Z",
+      "author": "core-framework@claude-code:host",
+      "slug": "legacy-measured",
+      "type": "propose-close",
+      "references": [],
+      "payload": {
+        "synthesis": "s",
+        "igm_met": {}
+      }
+    },
+    "otherAgents": [
+      "core-codex@codex:host",
+      "core-gemini@antigravity:host"
+    ],
+    "ratified": [
+      "core-codex@codex:host"
+    ],
+    "explicitRatified": [
+      "core-codex@codex:host"
+    ],
+    "implicitRatified": [],
+    "objected": [
+      "core-gemini@antigravity:host"
+    ],
+    "pending": [],
+    "requiredReviewers": [
+      "core-codex@codex:host",
+      "core-gemini@antigravity:host"
+    ],
+    "converged": false
+  },
+  "validation_errors": []
+}

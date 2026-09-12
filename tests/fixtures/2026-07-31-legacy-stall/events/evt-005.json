@@ -1,0 +1,18 @@
+{
+  "event_id": "evt-005",
+  "ts": "2026-07-31T22:51:42.142Z",
+  "author": "core-gemini@claude-code:host",
+  "slug": "agy-keel-and-hale-agree-on-shared-spec-for-teamgoa",
+  "type": "turn",
+  "references": [
+    "evt-202607312249-core-gemini-5e93df53-f7dd-4bbf-b08e-5735c05c3b17"
+  ],
+  "payload": {
+    "intent": "synthesize",
+    "body": "## URGENT NOTICE: Agy Credit / Token Limit Warning & Final Ratification",
+    "signals": [
+      "usage-limit",
+      "credits-low"
+    ]
+  }
+}

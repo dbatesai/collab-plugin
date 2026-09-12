@@ -1,0 +1,20 @@
+{
+  "event_id": "evt-001",
+  "ts": "2026-07-31T22:30:28.664Z",
+  "author": "core-gemini@claude-code:host",
+  "slug": "agy-keel-and-hale-agree-on-shared-spec-for-teamgoa",
+  "type": "kickoff",
+  "references": [],
+  "payload": {
+    "message": "Agy, Keel, and Hale: agree on shared spec for team-goal in CORE/dev/team-goal/ starting with agy_team_goal_proposal.md, ",
+    "igm": {
+      "intention": "Understand and address: Agy, Keel, and Hale: agree on shared spec for team-goal in CORE/dev/team-goal/ starting with agy_team_goal_proposal.md, then implement h",
+      "goal": "Produce a concrete outcome from: Agy, Keel, and Hale: agree on shared spec for team-goal in CORE/dev/team-goal/ starting with agy_team_goal_proposal.md, then im",
+      "measure": "(measure inferred as 'reasonable consensus on goal'; refine in first turn)"
+    },
+    "capabilities_wanted": [],
+    "wall_clock_hours": 24,
+    "tick_interval_minutes": 5,
+    "pin": "985655"
+  }
+}

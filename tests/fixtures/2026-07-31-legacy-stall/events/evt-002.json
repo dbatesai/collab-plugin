@@ -1,0 +1,14 @@
+{
+  "event_id": "evt-002",
+  "ts": "2026-07-31T22:30:28.664Z",
+  "author": "core-gemini@claude-code:host",
+  "slug": "agy-keel-and-hale-agree-on-shared-spec-for-teamgoa",
+  "type": "join",
+  "references": [
+    "evt-001"
+  ],
+  "payload": {
+    "capability_match": [],
+    "commitment": "Originator; self-joined at kickoff"
+  }
+}
