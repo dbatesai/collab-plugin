@@ -79,6 +79,17 @@ export const MUTATIONS = [
   { id: 'M17 committed work is judged by location again — a committed draft in the channel is pushed (R3-H4)', file: H,
     find: "if (!inChannel(path) || st.startsWith('D')) return true;", replace: "if (!inChannel(path)) return true; if (inChannel(path)) return false;",
     tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M18 ownership is bytes only — bytes recorded for one path authorize another (R3-H4)', file: H,
+    find: "return Array.isArray(manifest[relPath]) && manifest[relPath].includes(blobHash);",
+    replace: "return Object.values(manifest).flat().includes(blobHash);",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M19 renders are derived from every local event — an unpublished foreign event travels through them (R3-H4)', file: R,
+    find: "const publishable = (e) => !bounded || e.author === author || upstream.has(join('events', `${e.event_id}.json`));",
+    replace: "const publishable = () => true;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M20 renders overwrite whatever is there — an unrecorded existing file is destroyed (R3-H4)', file: R,
+    find: "if (!bounded || !existsSync(p)) return true;", replace: "return true;",
+    tests: ['test-collab-git-delivery.mjs'] },
 ];
 
 function runOne(m) {

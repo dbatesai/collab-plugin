@@ -317,4 +317,87 @@ test('git/delivery: an owned close interrupted before OR after commit reaches th
   }
 });
 
+
+// ------------------------------------------------------------ ownership end to end: path binding, derived content, preservation (R3-H4, fifth pass)
+
+const manifestDir = () => join(BASE, 'delivery');
+const remoteText = (slug, relInChannel) => remoteShow(slug, `collabs/2026-09-11-${slug}/${relInChannel}`);
+
+test('git/delivery: bytes recorded for one path do not authorize another — a copy of STATUS.md under a new name is foreign (R3-H4)', async () => {
+  const slug = 'git-delivery-path-binding';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'proposal');
+  const closed = await tick(slug);                                   // authority-boundary close: renders STATUS.md and delivers it
+  assert.equal(closed.action, 'close');
+  const before = ch.remoteCommits();
+  writeFileSync(join(ch.dir, 'unapproved-copy.md'), readFileSync(join(ch.dir, 'STATUS.md')));
+  const r = await tick(slug);
+  assert.equal(r.action, 'exit');
+  assert.ok(!ch.remoteFiles().some(f => f.endsWith('unapproved-copy.md')), 'recorded bytes under an unrecorded path were published');
+  assert.ok(r.delivery.foreign_paths.some(p => p.endsWith('unapproved-copy.md')));
+  assert.equal(r.delivery.blocked, null);
+  assert.equal(ch.remoteCommits(), before);
+});
+
+test('git/delivery: an unpublished foreign event never reaches the remote through the renders it would feed (R3-H4)', async () => {
+  const slug = 'git-delivery-derived-disclosure';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'proposal');
+  const MARK = 'ZZ-UNPUBLISHED-MARKER-7f3a';
+  const foreign = { event_id: 'evt-005', ts: iso(T0 + 21 * MIN), author: R1, slug, type: 'turn', references: [],
+    payload: { schema_version: '1.0', provenance: { emit_mode: 'interactive', harness: 'codex' }, intent: 'critique', body: `draft with ${MARK}`, signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) } };
+  const raw = JSON.stringify(foreign, null, 2);
+  writeFileSync(join(ch.dir, 'events', 'evt-005.json'), raw);
+  const r = await tick(slug);                                        // proposer ticks; R1's review never arrived → close
+  assert.equal(r.action, 'close');
+  assert.ok(!ch.remoteFiles().some(f => f.endsWith('events/evt-005.json')), 'the raw foreign event was published');
+  for (const f of ch.remoteFiles().filter(f => f.includes(`2026-09-11-${slug}/`))) {
+    const text = remoteShow(slug, f) || '';
+    assert.ok(!text.includes(MARK), `unpublished content reached the remote through ${f}`);
+    assert.ok(!text.includes('evt-005') || f.endsWith('/events/evt-005.json'), `the unpublished event is referenced in ${f}`);
+  }
+  assert.equal(readFileSync(join(ch.dir, 'events', 'evt-005.json'), 'utf8'), raw, 'the foreign event was not preserved');
+  assert.ok(remoteText(slug, 'STATUS.md'), 'the close still delivers its own STATUS.md');
+});
+
+test('git/delivery: an unrecorded existing STATUS.md is preserved, the render blocks explicitly, and the close is still delivered (R3-H4)', async () => {
+  const slug = 'git-delivery-preserve-draft';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'proposal');
+  const DRAFT = '# someone\'s draft status — DRAFT-MARKER-91c2\n';
+  writeFileSync(join(ch.dir, 'STATUS.md'), DRAFT);
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.equal(readFileSync(join(ch.dir, 'STATUS.md'), 'utf8'), DRAFT, 'the draft was overwritten by the render');
+  assert.ok(r.render_blocked, 'the render did not report that it left an unknown file alone');
+  assert.ok(r.render_blocked.paths.includes('STATUS.md'));
+  const close = readEvents(ch.dir).find(e => e.type === 'close');
+  assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${close.event_id}.json`)), 'the close itself was not delivered');
+  assert.ok(!(remoteText(slug, 'STATUS.md') || '').includes('DRAFT-MARKER'), 'the draft reached the remote');
+});
+
+test('git/delivery: a corrupt ownership manifest fails safe — renders are not delivered, the close is, nothing throws', async () => {
+  const slug = 'git-delivery-manifest-corrupt';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'proposal');
+  // A manifest written by an interrupted process: truncated JSON.
+  const dir = join(manifestDir(), 'core-framework');
+  mkdirSync(dir, { recursive: true });
+  const { readdirSync } = await import('node:fs');
+  for (const f of readdirSync(dir)) writeFileSync(join(dir, f), '{"STATUS.md": ["deadbeef');
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  const close = readEvents(ch.dir).find(e => e.type === 'close');
+  assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${close.event_id}.json`)));
+  assert.ok(r.delivery.verified);
+});
+
 test.after(() => rmSync(BASE, { recursive: true, force: true }));

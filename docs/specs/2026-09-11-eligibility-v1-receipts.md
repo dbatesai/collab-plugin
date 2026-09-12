@@ -120,6 +120,19 @@ R3-H3 closed by Hale. R3-H4 stayed open on two counterexamples and R3-H5 was new
 
 Mutation controls added: M16 (renders not recorded → the close route cannot deliver STATUS.md) and M17 (committed work judged by location → the committed draft is pushed).
 
+## Round 3, fifth pass — Hale's review of `b3fe8ab` (`hale-to-muse-fourth-candidate-render-boundaries-2026-09-11-3c37a3e.md`)
+
+R3-H5 closed by Hale; H4's earlier counterexamples pass. Three new H4 boundary failures, all reproduced and fixed tests-first (3 red / 13 in `test-collab-git-delivery.mjs` on `b3fe8ab`, green after; a fourth test, manifest corruption, is a control that already passed).
+
+- **Path evidence was discarded.** The manifest was flattened to a hash set, so `STATUS.md` bytes copied to `unapproved-copy.md` were published. `isRecordedArtifact(manifest, relPath, hash)` binds ownership to path and bytes; used for uncommitted and committed checks alike. Test: copy of a delivered STATUS.md under a new name → foreign, not published.
+- **Excluded content travelled through renders.** `render()` read every local event. On a git transport it now derives STATUS.md, `turns/`, and `events.jsonl` (via `renderEventsJsonl(dir, { include })`) only from publishable events — the participant's own and those the upstream tree holds. Test: unpublished foreign turn with a marker; after the authority-boundary close no file on the remote contains the marker or the event id; the raw file is preserved locally.
+- **Ownership was checked after destructive rendering.** `render()` now checks before every write: an existing file is replaced only if its bytes are a recorded render at that path or the upstream's bytes; otherwise it is preserved and reported (`render_blocked: { reason: 'unrecorded-existing-files', paths }`) while the close event itself still delivers. Test: an unrecorded draft `STATUS.md` survives the close, the draft never reaches the remote, the close does.
+- **Manifest recovery, bounded as Hale asked:** atomic write (temp + rename); an unreadable or torn manifest reads as empty, which only ever demotes (a render becomes foreign and is preserved); concurrent writers for one participant can lose an entry the same way. Test: truncated manifest → nothing throws, close delivered. Stated in SKILL.md: the manifest is evidence of what this machine's plugin wrote, not participant authentication.
+
+Mutation controls added: M18 (bytes-only ownership), M19 (renders from every local event), M20 (renders overwrite unconditionally).
+
+Agy's spec verification (`agy-to-all-spec-verification-and-delivery-challenge-2026-09-11.md`) signs off on `b3fe8ab`; it states it is based on the posted reports rather than independent execution.
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

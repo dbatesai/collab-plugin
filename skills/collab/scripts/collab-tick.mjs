@@ -156,13 +156,13 @@ export async function tickDeterministic(slug, options = {}) {
       event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp, type: 'close', references: [],
       payload,
     };
-    let delivery = null;
+    let delivery = null, rendered = null;
     if (!dryRun) {
       appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet, publish: false });
+      rendered = await render(slug, { collabDir: dir, author: triplet, publish: false });
       if (isGitTransport(transport)) delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (${payload.outcome})`);
     }
-    return { action: 'close', reason: net, event: ev, delivery };
+    return { action: 'close', reason: net, event: ev, delivery, render_blocked: rendered?.blocked ?? null };
   }
 
   if (route === 'terminal:authority-boundary') {
@@ -175,15 +175,15 @@ export async function tickDeterministic(slug, options = {}) {
       // terminal record that does not say this is just a different word for the same silence.
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: contract.outcome, ...contract.receipt },
     };
-    let delivery = null;
+    let delivery = null, rendered = null;
     if (!dryRun) {
       appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet, publish: false });
+      rendered = await render(slug, { collabDir: dir, author: triplet, publish: false });
       if (isGitTransport(transport)) {
         delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (${contract.outcome})`);
       }
     }
-    return { action: 'close', reason: 'authority-boundary', event: ev, delivery };
+    return { action: 'close', reason: 'authority-boundary', event: ev, delivery, render_blocked: rendered?.blocked ?? null };
   }
 
   if (route === 'emit-close') {
@@ -193,13 +193,13 @@ export async function tickDeterministic(slug, options = {}) {
       references: [rat.proposeClose.event_id],
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: 'converged' },
     };
-    let delivery = null;
+    let delivery = null, rendered = null;
     if (!dryRun) {
       appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet, publish: false });
+      rendered = await render(slug, { collabDir: dir, author: triplet, publish: false });
       if (isGitTransport(transport)) delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (converged)`);
     }
-    return { action: 'close', reason: 'converged', event: ev, delivery };
+    return { action: 'close', reason: 'converged', event: ev, delivery, render_blocked: rendered?.blocked ?? null };
   }
 
   // v1.0 #6: deterministic chase emission before handing off to LLM.

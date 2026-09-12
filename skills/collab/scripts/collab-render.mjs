@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
-  checkSafetyNets, deliverChannel, recordOwnedArtifact, authorSlugFromTriplet, reconcileForeignSurface,
+  checkSafetyNets, deliverChannel, recordOwnedArtifact, readDeliveryManifest, isRecordedArtifact, gitBlobHash, gitUpstreamBlobs,
+  authorSlugFromTriplet, reconcileForeignSurface,
   renderEventsJsonl, measureVerdicts, openRequests,
   STALL_TICKS, TICK_INTERVAL_MS,
 } from './collab-event-helpers.mjs';
@@ -136,11 +137,28 @@ export async function render(slug, options = {}) {
     );
   }
 
-  const events = readEvents(dir);
+  const all = readEvents(dir);
+  const transport = options.transport || all.find(e => e.type === 'kickoff')?.payload?.transport || 'github:files';
 
-  // Every render is recorded as this participant's artifact, so delivery can recognise it
-  // later in any state — a render is a generated file with no author inside it.
+  // Ownership is an end-to-end constraint, not a publisher gate. On a git transport the
+  // renders are derived only from events this participant may publish — its own, and those
+  // the upstream already holds — so an unpublished foreign event never travels through a
+  // derived file; and an existing file is replaced only when it is a render this participant
+  // recorded or the bytes the upstream holds, so unknown bytes are preserved and reported.
+  const bounded = Boolean(author) && isGitTransport(transport);
+  const upstream = bounded ? gitUpstreamBlobs(dir, transport) : new Map();
+  const manifest = author ? readDeliveryManifest(dir, author) : {};
+  const publishable = (e) => !bounded || e.author === author || upstream.has(join('events', `${e.event_id}.json`));
+  const events = all.filter(publishable);
+  const preserved = [];
+  const mayReplace = (relPath) => {
+    const p = join(dir, relPath);
+    if (!bounded || !existsSync(p)) return true;
+    const h = gitBlobHash(readFileSync(p));
+    return isRecordedArtifact(manifest, relPath, h) || upstream.get(relPath) === h;
+  };
   const put = (relPath, content) => {
+    if (!mayReplace(relPath)) { preserved.push(relPath); return; }
     writeFileSync(join(dir, relPath), content);
     if (author) recordOwnedArtifact(dir, author, relPath, content);
   };
@@ -153,15 +171,17 @@ export async function render(slug, options = {}) {
     put(join('turns', `${idSuffix}-${authorSlugFromTriplet(e.author)}.md`), buildTurnMd(e));
   }
 
-  renderEventsJsonl(dir);
-  if (author) recordOwnedArtifact(dir, author, 'events.jsonl', readFileSync(join(dir, 'events.jsonl')));
+  if (mayReplace('events.jsonl')) {
+    const content = renderEventsJsonl(dir, { include: publishable });
+    if (author) recordOwnedArtifact(dir, author, 'events.jsonl', content);
+  } else preserved.push('events.jsonl');
 
-  const transport = options.transport || events.find(e => e.type === 'kickoff')?.payload?.transport || 'github:files';
+  const blocked = preserved.length ? { reason: 'unrecorded-existing-files', paths: preserved } : null;
   if (!dryRun && publish && author && isGitTransport(transport)) {
     const last = events[events.length - 1];
-    return deliverChannel(dir, transport, author, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`);
+    return { blocked, delivery: deliverChannel(dir, transport, author, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`) };
   }
-  return null;
+  return { blocked, delivery: null };
 }
 
 export function main(argv) {

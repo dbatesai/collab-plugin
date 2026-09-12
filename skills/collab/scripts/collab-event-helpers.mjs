@@ -7,7 +7,7 @@
  */
 import {
   readFileSync, writeFileSync,
-  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync,
+  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync, renameSync,
 } from 'node:fs';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { join, resolve, dirname, relative, basename } from 'node:path';
@@ -501,7 +501,7 @@ export function reconcileForeignSurface(collabDir, author) {
 //
 // Refuses when events.jsonl holds events canonical does not, since rendering would destroy
 // them. The guard is at the writer boundary so every caller inherits it; reconcile first.
-export function renderEventsJsonl(collabDir) {
+export function renderEventsJsonl(collabDir, { include } = {}) {
   const { foreign } = foreignSurfaceEvents(collabDir);
   if (foreign.length > 0) {
     const err = new Error(
@@ -513,9 +513,12 @@ export function renderEventsJsonl(collabDir) {
     err.foreignIds = foreign.map(e => e.event_id);
     throw err;
   }
-  const events = readEvents(collabDir);
+  // `include` narrows the render to events the caller may publish; a derived file must not
+  // carry what its raw inputs may not.
+  const events = readEvents(collabDir).filter(e => !include || include(e));
   const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
   writeFileSync(join(collabDir, 'events.jsonl'), content);
+  return content;
 }
 
 // nextEventId: legacy helper for v0.1.x sequential IDs (still produced by kickoff for
@@ -1252,23 +1255,53 @@ export function gitBlobHash(bytes) {
   return createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex');
 }
 
+/**
+ * The manifest: channel-relative path → blob ids this participant's plugin wrote there.
+ * Unreadable or corrupt reads as empty — the safe direction: a render with no evidence is
+ * listed as foreign and preserved, never published. Concurrent writers for the same
+ * participant on one machine can lose each other's entry the same way; a lost entry
+ * demotes a render to foreign, it never promotes anything.
+ */
+export function readDeliveryManifest(collabDir, author) {
+  try {
+    const m = JSON.parse(readFileSync(deliveryManifestPath(collabDir, author), 'utf8'));
+    return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+  } catch { return {}; }
+}
+
+/** Ownership is bound to the path AND the bytes: bytes recorded for one path authorize no other. */
+export function isRecordedArtifact(manifest, relPath, blobHash) {
+  return Array.isArray(manifest[relPath]) && manifest[relPath].includes(blobHash);
+}
+
 /** Record that `author`'s plugin wrote these bytes at `relPath` in the channel. Returns the blob id. */
 export function recordOwnedArtifact(collabDir, author, relPath, bytes) {
   const p = deliveryManifestPath(collabDir, author);
-  let m = {};
-  try { m = JSON.parse(readFileSync(p, 'utf8')); } catch { /* first artifact */ }
+  const m = readDeliveryManifest(collabDir, author);
   const h = gitBlobHash(bytes);
   const list = Array.isArray(m[relPath]) ? m[relPath] : [];
   if (!list.includes(h)) list.push(h);
   m[relPath] = list;
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(m, null, 2));
+  // Atomic replace: an interrupted write leaves the previous manifest, never a torn one.
+  const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(m, null, 2));
+  renameSync(tmp, p);
   return h;
 }
 
-function ownedBlobHashes(collabDir, author) {
-  try { return new Set(Object.values(JSON.parse(readFileSync(deliveryManifestPath(collabDir, author), 'utf8'))).flat()); }
-  catch { return new Set(); }
+/** Channel-relative path → blob id for everything the upstream branch holds under the channel. */
+export function gitUpstreamBlobs(collabDir, transport) {
+  const repo = repoForTransport(transport);
+  const rel = relative(repo, collabDir);
+  const out = new Map();
+  const r = runGit(repo, ['ls-tree', '-r', '@{u}', '--', collabDir], { allowFail: true });
+  if (!r.ok) return out;
+  for (const line of r.stdout.split('\n').filter(Boolean)) {
+    const [meta, path] = line.split('\t');
+    out.set(relative(rel, path), meta.split(' ')[2]);
+  }
+  return out;
 }
 
 /**
@@ -1291,7 +1324,8 @@ export function deliverChannel(collabDir, transport, author, message, owner = `p
   const repo = repoForTransport(transport);
   const rel = relative(repo, collabDir);
   const eventsRel = join(rel, 'events');
-  const manifest = ownedBlobHashes(collabDir, author);
+  const manifest = readDeliveryManifest(collabDir, author);
+  const recorded = (path, hash) => isRecordedArtifact(manifest, relative(rel, path), hash);
   const isOwnedEvent = (path, text) => {
     const base = basename(path);
     if (dirname(path) !== eventsRel || !base.endsWith('.json') || base.startsWith('.')) return false;
@@ -1312,7 +1346,7 @@ export function deliverChannel(collabDir, transport, author, message, owner = `p
       // Events are never rewritten by this plugin, so the author inside one is evidence only
       // for a NEW file; a tracked file that changed is owned only if its bytes are a render
       // this participant recorded.
-      const mine = manifest.has(gitBlobHash(bytes)) || (isNew && isOwnedEvent(path, bytes.toString('utf8')));
+      const mine = recorded(path, gitBlobHash(bytes)) || (isNew && isOwnedEvent(path, bytes.toString('utf8')));
       if (mine) owned.push(path);
       else if (isNew) foreign.push(path);
       else blocked.push(path);                                             // a tracked file changed into something not ours
@@ -1340,7 +1374,7 @@ export function deliverChannel(collabDir, transport, author, message, owner = `p
         const [meta, path] = line.split('\t');
         const [, , , newBlob, st] = meta.split(' ');
         if (!inChannel(path) || st.startsWith('D')) return true;
-        if (manifest.has(newBlob)) return false;
+        if (recorded(path, newBlob)) return false;
         return !(st === 'A' && isOwnedEvent(path, runGit(repo, ['cat-file', '-p', newBlob]).stdout));
       }));
     if (unrelated.length) {
