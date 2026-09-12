@@ -10,7 +10,8 @@ import { fileURLToPath } from 'node:url';
 import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
-  checkSafetyNets, deliverChannel, recordOwnedArtifact, readDeliveryManifest, isRecordedArtifact, gitBlobHash, gitUpstreamBlobs,
+  checkSafetyNets, deliverChannel, recordOwnedArtifact, readDeliveryManifest, isRecordedArtifact, gitBlobHash, gitUpstreamBlobs, gitBlobText,
+  EVENT_SOURCE,
   authorSlugFromTriplet, reconcileForeignSurface,
   renderEventsJsonl, measureVerdicts, openRequests,
   STALL_TICKS, TICK_INTERVAL_MS,
@@ -148,17 +149,28 @@ export async function render(slug, options = {}) {
   const bounded = Boolean(author) && isGitTransport(transport);
   const upstream = bounded ? gitUpstreamBlobs(dir, transport) : new Map();
   const manifest = author ? readDeliveryManifest(dir, author) : {};
-  // An input is publishable by its exact bytes: an event the upstream holds counts only if
-  // the local file still IS the published blob (an edit to published history is not an
-  // input, whoever wrote it — author equality does not authorize rewriting), and an event
-  // the upstream lacks counts only if this participant wrote it.
+  // An input is publishable by the exact bytes that were parsed: the reader binds each event
+  // to its source file and that file's blob id in the same read, so the evidence is of the
+  // bytes in hand — never of a file re-read by an id-derived path. An event whose file the
+  // upstream holds counts only if that blob is the published one (an edit to published
+  // history is not an input, whoever wrote it — author equality does not authorize
+  // rewriting). An event published only as a line of the upstream's events.jsonl (a legacy
+  // writer) counts if it is that line, canonically. Anything else counts only if this
+  // participant wrote it.
+  const upstreamJsonl = new Map();
+  if (bounded && upstream.has('events.jsonl')) {
+    for (const line of gitBlobText(transport, upstream.get('events.jsonl')).split('\n')) {
+      if (!line.trim()) continue;
+      try { const o = JSON.parse(line); if (o?.event_id) upstreamJsonl.set(o.event_id, JSON.stringify(o)); } catch { /* not an event line */ }
+    }
+  }
   const publishable = (e) => {
     if (!bounded) return true;
-    const relPath = join('events', `${e.event_id}.json`);
-    if (upstream.has(relPath)) {
-      try { return gitBlobHash(readFileSync(join(dir, relPath))) === upstream.get(relPath); } catch { return false; }
-    }
-    return e.author === author;
+    const src = e[EVENT_SOURCE];
+    if (!src) return false;
+    if (src.hash && upstream.has(src.path)) return src.hash === upstream.get(src.path);
+    if (upstreamJsonl.get(e.event_id) === JSON.stringify(e)) return true;
+    return !upstream.has(src.path) && e.author === author;
   };
   const events = all.filter(publishable);
   const preserved = [];

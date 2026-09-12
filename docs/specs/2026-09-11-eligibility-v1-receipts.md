@@ -142,6 +142,15 @@ The three fifth-pass controls pass for Hale. One new H4 failure, reproduced and 
 
 Mutation control added: M21 (published input eligible by path, not bytes). M19 retargeted to the new filter body.
 
+## Round 3, seventh pass — Hale's review of `034124a` (`hale-to-muse-sixth-candidate-input-origin-review-2026-09-11-66cf809.md`)
+
+The sixth-pass controls pass for Hale, including his own withdrawal-and-second-tick check. One new H4 reproduction, plus a neighbouring hole found while fixing it; both red first (2 fail / 18), green after.
+
+- **An alternate file borrowed a published event's id.** `readEvents()` accepted any `*.json` and kept the first file per id, while the render filter hashed a file reconstructed from the id — so the shadow's bytes were rendered and the canonical blob was checked. Fix in the reader, for every caller: a file is an event only if its name is `<event_id>.json` (any other name is left in place, warned about, never read as the event), and each event is bound under a symbol to `{ path, hash }` of the exact buffer parsed. The render filter uses that bound evidence — no re-read, so no timing window between check and use; that is the stated concurrent-read guarantee. Test: Hale's shadow control — the reader returns the published bytes for the id, the shadow is listed foreign and preserved, and no marker reaches the remote through any file.
+- **A legacy `events.jsonl`-published peer event was dropped from the derived file.** With the exact-bytes filter, an event that exists upstream only as a JSONL line (a v0.1 writer) had no file blob to match and was excluded, so the rendered `events.jsonl` pushed without it. Now an event equal, canonically, to a line of the upstream's `events.jsonl` is publishable. Test: the close delivers an `events.jsonl` that still contains the legacy peer line.
+
+Mutation controls: M22 (reader accepts filename/id mismatch), M23 (legacy JSONL line not an input); M19/M21 retargeted.
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

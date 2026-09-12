@@ -215,12 +215,23 @@ export function createCollabDir(slug) {
 
 // --- Event I/O ---
 
+/**
+ * Where an event came from, bound to the bytes that were parsed: `{ path, hash }` with the
+ * channel-relative path and the git blob id of the exact buffer `JSON.parse` saw. Set by
+ * `readEvents` under a symbol so it never serialises; read by the render's input filter so
+ * the evidence is of the bytes in hand, never of a file re-read by an id-derived path.
+ */
+export const EVENT_SOURCE = Symbol('collab.event-source');
+
 // Read all events from <collabDir>/events/*.json. Sort by ts, then event_id as tie-breaker.
+// A file is an event only if its name is its event id: `events/<event_id>.json` is the one
+// shape this plugin writes, so any other name is not a second copy of that event, it is a
+// foreign file that borrowed an id. It is left where it is and never read as the event.
 // Backward compat: if events/ does not exist but events.jsonl does, read JSONL directly (v0.1.x).
 export function readEvents(collabDir) {
   const eventsDir = join(collabDir, 'events');
   if (existsSync(eventsDir)) {
-    const seen = new Map(); // event_id → event (first wins on dup)
+    const seen = new Map(); // event_id → event
     for (const name of readdirSync(eventsDir)) {
       // Skip non-JSON and dot-prefixed artifacts: .tmp- (in-flight writes),
       // .quarantined- (v1 invalid events), .superseded- (quarantine originals).
@@ -228,12 +239,17 @@ export function readEvents(collabDir) {
       if (!name.endsWith('.json') || name.startsWith('.')) continue;
       const path = join(eventsDir, name);
       try {
-        const content = readFileSync(path, 'utf8');
-        const event = JSON.parse(content);
+        const bytes = readFileSync(path);
+        const event = JSON.parse(bytes.toString('utf8'));
         if (!event || typeof event !== 'object' || !event.event_id || !event.ts) {
           process.stderr.write(`(warn) skipping malformed event file ${path}\n`);
           continue;
         }
+        if (name !== `${event.event_id}.json`) {
+          process.stderr.write(`(warn) skipping ${path}: file name is not its event id (${event.event_id}); left in place, not read as an event\n`);
+          continue;
+        }
+        event[EVENT_SOURCE] = { path: join('events', name), hash: gitBlobHash(bytes) };
         if (!seen.has(event.event_id)) seen.set(event.event_id, event);
       } catch (e) {
         process.stderr.write(`(warn) skipping unreadable event file ${path}: ${e.message}\n`);
@@ -249,8 +265,11 @@ export function readEvents(collabDir) {
   const out = [];
   for (const line of readFileSync(jsonlPath, 'utf8').split('\n')) {
     if (!line.trim()) continue;
-    try { out.push(JSON.parse(line)); }
-    catch (e) { process.stderr.write(`(warn) skipping malformed JSONL line in ${jsonlPath}: ${e.message}\n`); }
+    try {
+      const event = JSON.parse(line);
+      event[EVENT_SOURCE] = { path: 'events.jsonl', hash: null };
+      out.push(event);
+    } catch (e) { process.stderr.write(`(warn) skipping malformed JSONL line in ${jsonlPath}: ${e.message}\n`); }
   }
   return out;
 }
@@ -1288,6 +1307,11 @@ export function recordOwnedArtifact(collabDir, author, relPath, bytes) {
   writeFileSync(tmp, JSON.stringify(m, null, 2));
   renameSync(tmp, p);
   return h;
+}
+
+/** The bytes of a blob the repository holds, as text. */
+export function gitBlobText(transport, blob) {
+  return runGit(repoForTransport(transport), ['cat-file', '-p', blob]).stdout;
 }
 
 /** Channel-relative path → blob id for everything the upstream branch holds under the channel. */

@@ -474,4 +474,49 @@ test('git/delivery: an edited published event by the ticking participant is not 
   assert.ok(readFileSync(p, 'utf8').includes(MARK), 'the edit was reverted instead of preserved');
 });
 
+test('git/delivery: an alternate file borrowing a published event\'s id is not that event — the reader binds bytes, path, and id, and derived files carry only the published bytes (R3-H4)', async () => {
+  const slug = 'git-delivery-shadow-file';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'peer turn and proposal');
+  const MARK = 'ZZ-SHADOW-MARKER-a91d';
+  const shadow = JSON.parse(readFileSync(join(ch.dir, 'events', `${peer.event_id}.json`), 'utf8'));
+  shadow.payload.body = `shadow body ${MARK}`;
+  const shadowRaw = JSON.stringify(shadow, null, 2);
+  writeFileSync(join(ch.dir, 'events', '000-shadow.json'), shadowRaw);     // same id, ts, author; sorts first
+  const seen = readEvents(ch.dir).find(e => e.event_id === peer.event_id);
+  assert.equal(seen.payload.body, 'published peer critique', 'the reader took the alternate file\'s bytes for a published id');
+  assert.equal(readEvents(ch.dir).filter(e => e.event_id === peer.event_id).length, 1);
+
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.ok(!readFileSync(join(ch.dir, 'events.jsonl'), 'utf8').includes(MARK), 'the shadow bytes were derived locally');
+  for (const f of ch.remoteFiles().filter(f => f.includes(`2026-09-11-${slug}/`))) {
+    assert.ok(!(remoteShow(slug, f) || '').includes(MARK), `the shadow bytes reached the remote through ${f}`);
+  }
+  assert.ok(remoteText(slug, `events/${peer.event_id}.json`), 'the canonical peer event should still be on the remote');
+  assert.ok(remoteText(slug, 'events.jsonl').includes('published peer critique'), 'the published peer event was dropped from the derived file');
+  assert.equal(readFileSync(join(ch.dir, 'events', '000-shadow.json'), 'utf8'), shadowRaw, 'the foreign bytes were not preserved');
+  assert.ok(r.delivery.foreign_paths.some(p => p.endsWith('000-shadow.json')));
+});
+
+test('git/delivery: a peer event published only as a legacy events.jsonl line is still in the rendered events.jsonl the close delivers', async () => {
+  const slug = 'git-delivery-legacy-jsonl-peer';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  // A peer running a JSONL-only writer appended straight to events.jsonl; it was pushed that way.
+  const line = { event_id: 'evt-legacy-peer', ts: iso(T0 + 12 * MIN), author: R1, slug, type: 'turn', references: [],
+    payload: { intent: 'critique', body: 'legacy peer critique, published in events.jsonl only', signals: [] } };
+  const events = readEvents(ch.dir);
+  writeFileSync(join(ch.dir, 'events.jsonl'), [...events, line].map(e => JSON.stringify(e)).join('\n') + '\n');
+  sync(ch, 'proposal and legacy jsonl');
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.ok((remoteText(slug, 'events.jsonl') || '').includes('legacy peer critique'), 'a published legacy peer event was removed from the derived file on the remote');
+  assert.ok(r.delivery.verified);
+});
+
 test.after(() => rmSync(BASE, { recursive: true, force: true }));
