@@ -345,6 +345,8 @@ function writerGateError(collabDir, event) {
 }
 
 export function appendEvent(collabDir, event) {
+  const violations = eventFilenameViolations(collabDir);
+  if (violations.length) throw new Error(`event-filename-violation: ${violations.join(', ')} — nothing is written to this channel while a file under events/ is not named for the event it contains`);
   const gate = writerGateError(collabDir, event);
   if (gate) throw new Error(gate);
   const eventsDir = join(collabDir, 'events');
@@ -1397,6 +1399,12 @@ export function deliverChannel(collabDir, transport, author, message, owner = `p
   };
   const inChannel = (p) => p === rel || p.startsWith(rel + '/');
 
+  // The hard stop applies at this boundary too: nothing is committed or pushed from a channel
+  // holding a file under events/ that is not named for the event it contains.
+  const violations = eventFilenameViolations(collabDir);
+  if (violations.length) {
+    return { published_paths: [], foreign_paths: [], blocked: { reason: 'event-filename-violation', paths: violations }, pushed: false, verified: false };
+  }
   return withRepoClaim(repo, owner, () => {
     const status = runGit(repo, ['status', '--porcelain', '--untracked-files=all', '--', collabDir]).stdout.split('\n').filter(Boolean);
     const owned = [], foreign = [], blocked = [];

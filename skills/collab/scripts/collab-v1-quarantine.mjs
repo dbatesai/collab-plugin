@@ -14,8 +14,7 @@
 import { existsSync, readFileSync, writeFileSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  appendEvent, readEvents, generateEventId, authorSlugFromTriplet,
-} from './collab-event-helpers.mjs';
+  appendEvent, readEvents, generateEventId, authorSlugFromTriplet, eventFilenameViolations } from './collab-event-helpers.mjs';
 
 // v1 turn events require these payload fields (typed handoff contract).
 export const V1_REQUIRED_TURN_FIELDS = ['state', 'owner', 'waiting_on', 'next_update_by'];
@@ -77,18 +76,25 @@ export function validateEventForRouting(event) {
 export function quarantineEvent(collabDir, event, reason, opts = {}) {
   const now = opts.now || (() => new Date().toISOString());
   const eventsDir = join(collabDir, 'events');
-  const src = join(eventsDir, `${event.event_id}.json`);
-  const dst = join(eventsDir, `.quarantined-${event.event_id}.json`);
+  // The file this acts on is the file that was READ — never a path rebuilt from the event's
+  // id, which is untrusted input and could name somebody else's valid file.
+  const sourceName = opts.sourceName || `${event.event_id}.json`;
+  if (sourceName !== `${event.event_id}.json`) {
+    throw new Error(`event-filename-violation: refusing to quarantine ${sourceName}, which is not named for the event it contains (${event.event_id})`);
+  }
+  const stem = sourceName.slice(0, -5);
+  const src = join(eventsDir, sourceName);
+  const dst = join(eventsDir, `.quarantined-${stem}.json`);
   const quarantined = {
     ...event,
-    _quarantine: { reason, quarantined_at: now(), original_file: `${event.event_id}.json` },
+    _quarantine: { reason, quarantined_at: now(), original_file: sourceName },
   };
   // Write the quarantine artifact first (atomic via tmp), then remove the source.
-  const tmp = join(eventsDir, `.tmp-q-${event.event_id}-${process.pid}.json`);
+  const tmp = join(eventsDir, `.tmp-q-${stem}-${process.pid}.json`);
   writeFileSync(tmp, JSON.stringify(quarantined, null, 2));
   renameSync(tmp, dst);
   if (existsSync(src)) {
-    try { renameSync(src, join(eventsDir, `.superseded-${event.event_id}.json`)); }
+    try { renameSync(src, join(eventsDir, `.superseded-${stem}.json`)); }
     catch { /* source already moved */ }
   }
   return dst;
@@ -101,8 +107,12 @@ export function quarantineEvent(collabDir, event, reason, opts = {}) {
  */
 export function quarantineInvalidV1Events(collabDir, opts = {}) {
   const eventsDir = join(collabDir, 'events');
-  const report = { quarantined: [], warnings: [], notices: [] };
+  const report = { quarantined: [], warnings: [], notices: [], refused: null };
   if (!existsSync(eventsDir)) return report;
+  // A file whose name is not its event id is a hard stop here too: nothing is moved,
+  // written, or announced while one is present. Refusal precedes every mutation.
+  const violations = eventFilenameViolations(collabDir);
+  if (violations.length) { report.refused = { reason: 'event-filename-violation', paths: violations }; return report; }
 
   // Ids already announced, so a tick every cycle does not flood the ledger with notices.
   const alreadyNoticed = new Set(
@@ -117,10 +127,11 @@ export function quarantineInvalidV1Events(collabDir, opts = {}) {
     let event;
     try { event = JSON.parse(readFileSync(join(eventsDir, name), 'utf8')); }
     catch { continue; }
+    if (!event || typeof event !== 'object' || name !== `${event.event_id}.json`) continue;
     const v = validateEventForRouting(event);
     if (v.valid) continue;
     if (v.tier === 'v1') {
-      quarantineEvent(collabDir, event, v.reason, opts);
+      quarantineEvent(collabDir, event, v.reason, { ...opts, sourceName: name });
       report.quarantined.push({ event_id: event.event_id, reason: v.reason });
 
       // Preserving bytes is not sufficient: without a routed notice, the only path from

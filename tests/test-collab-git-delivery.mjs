@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -26,6 +26,8 @@ mkdirSync(process.env.COLLAB_REPOS_ROOT, { recursive: true });
 const { appendEvent, readEvents, deliveryManifestPath, eventFilenameViolations } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
 const { validateEvents } = await import('../skills/collab/scripts/collab-validate.mjs');
 const { render } = await import('../skills/collab/scripts/collab-render.mjs');
+const { quarantineInvalidV1Events } = await import('../skills/collab/scripts/collab-v1-quarantine.mjs');
+const { deliverChannel } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
 const { tickDeterministic } = await import('../skills/collab/scripts/collab-tick.mjs');
 
 const ME = 'core-framework@claude-code:host';
@@ -630,6 +632,92 @@ test('git/delivery: after the refusal, renaming the offending file lets the next
   assert.equal((await tick(slug)).action, 'exit');
   assert.equal(ch.remoteCommits(), before + 1, 'a further tick published again');
   assert.ok(peer, 'setup');
+});
+
+// ------------------------------------------------------------ the hard stop, at every boundary (R3-H6, R3-M2)
+
+test('quarantine: a malformed shadow cannot move the valid file whose id it borrowed — refusal precedes every mutation (R3-H6)', async () => {
+  const slug = 'git-delivery-quarantine-shadow';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'peer turn and proposal');
+  const canonical = join(ch.dir, 'events', `${peer.event_id}.json`);
+  const canonicalBytes = readFileSync(canonical, 'utf8');
+  const MARK = 'ZZ-MALFORMED-SHADOW-77b1';
+  const shadow = { ...JSON.parse(canonicalBytes), payload: { ...JSON.parse(canonicalBytes).payload, body: `shadow ${MARK}`, schema_version: '1.0' } };
+  delete shadow.payload.provenance;                                   // declares v1, lacks provenance: quarantine bait
+  const shadowRaw = JSON.stringify(shadow, null, 2);
+  writeFileSync(join(ch.dir, 'events', '000-shadow.json'), shadowRaw);
+  const before = readdirSync(join(ch.dir, 'events')).sort();
+
+  const r = await tick(slug);
+  assert.equal(r.action, 'refused');
+  assert.deepEqual(readdirSync(join(ch.dir, 'events')).sort(), before, 'the refused tick changed the events directory');
+  assert.equal(readFileSync(canonical, 'utf8'), canonicalBytes, 'the canonical valid file was altered');
+  assert.ok(!readdirSync(join(ch.dir, 'events')).some(f => f.includes('superseded') || f.includes('quarantined')), 'quarantine acted on a shadow');
+  assert.equal(readEvents(ch.dir).find(e => e.event_id === peer.event_id)?.payload.body, 'published peer critique', 'the valid peer turn disappeared from the reader');
+  assert.ok(!readEvents(ch.dir).some(e => e.type === 'quarantined'), 'a quarantine notice was appended');
+  assert.equal(readFileSync(join(ch.dir, 'events', '000-shadow.json'), 'utf8'), shadowRaw);
+
+  // The direct quarantine entry is bound the same way: it acts only on the file it read, and
+  // a file whose name is not its id is refused, not processed.
+  const q = quarantineInvalidV1Events(ch.dir, { author: ME });
+  assert.deepEqual(readdirSync(join(ch.dir, 'events')).sort(), before, 'direct quarantine mutated the directory with a shadow present');
+  assert.ok(q?.refused?.paths?.includes('events/000-shadow.json'), 'direct quarantine did not report the refusal');
+});
+
+test('quarantine: a malformed v1 file under its OWN name is still quarantined, and only that file moves (control)', async () => {
+  const slug = 'git-delivery-quarantine-control';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  sync(ch, 'peer turn');
+  const bad = { event_id: 'evt-bad-v1', ts: iso(T0 + 11 * MIN), author: R1, slug, type: 'turn', references: [],
+    payload: { schema_version: '1.0', intent: 'critique', body: 'declares v1 without provenance', signals: [] } };
+  writeFileSync(join(ch.dir, 'events', 'evt-bad-v1.json'), JSON.stringify(bad, null, 2));
+  quarantineInvalidV1Events(ch.dir, { author: ME });
+  const names = readdirSync(join(ch.dir, 'events'));
+  assert.ok(!names.includes('evt-bad-v1.json'), 'the malformed file was not quarantined');
+  assert.ok(names.some(f => f.startsWith('.quarantined-') && f.includes('evt-bad-v1')), 'no quarantine artifact');
+  assert.ok(names.includes(`${peer.event_id}.json`), 'a valid file was touched');
+  assert.equal(readEvents(ch.dir).find(e => e.event_id === peer.event_id)?.payload.body, 'published peer critique');
+});
+
+test('boundaries: with a shadow present, direct render(), deliverChannel() and appendEvent() all refuse before output; after the fix they succeed (R3-M2)', async () => {
+  const slug = 'git-delivery-boundaries-refuse';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  sync(ch, 'peer turn');
+  const before = ch.remoteCommits();
+  const shadow = JSON.parse(readFileSync(join(ch.dir, 'events', `${peer.event_id}.json`), 'utf8'));
+  shadow.payload.body = 'shadow ZZ-BOUNDARY-3d0e';
+  writeFileSync(join(ch.dir, 'events', '000-shadow.json'), JSON.stringify(shadow, null, 2));
+  // An owned pending event that a bypassing publisher would happily ship.
+  const mine = { event_id: 'evt-mine-pending', ts: iso(T0 + 12 * MIN), author: ME, slug, type: 'turn', references: [],
+    payload: { schema_version: '1.0', provenance: { emit_mode: 'interactive', harness: 'claude-code' }, intent: 'clarify', body: 'pending note', signals: [], state: 'working', owner: ME, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) } };
+  writeFileSync(join(ch.dir, 'events', `${mine.event_id}.json`), JSON.stringify(mine, null, 2));
+
+  const rendered = await render(slug, { collabDir: ch.dir, author: ME });
+  assert.equal(rendered?.refused?.reason, 'event-filename-violation', 'direct render did not refuse');
+  assert.ok(!existsSync(join(ch.dir, 'STATUS.md')), 'direct render wrote output before refusing');
+  const delivered = deliverChannel(ch.dir, `github:${REPO}`, ME, 'direct');
+  assert.equal(delivered.blocked?.reason, 'event-filename-violation', 'direct deliverChannel did not refuse');
+  assert.equal(delivered.pushed, false);
+  assert.throws(() => appendEvent(ch.dir, { event_id: 'evt-x', ts: iso(T0 + 13 * MIN), author: ME, slug, type: 'turn', references: [], payload: { intent: 'clarify', body: 'b', signals: [] } }), /event-filename-violation/);
+  assert.equal(ch.remoteCommits(), before, 'something reached the remote past the hard stop');
+  assert.ok(!ch.remoteFiles().some(f => f.endsWith(`events/${mine.event_id}.json`)));
+
+  // Repair, then the same direct calls succeed once.
+  rmSync(join(ch.dir, 'events', '000-shadow.json'));
+  const ok = await render(slug, { collabDir: ch.dir, author: ME });
+  assert.equal(ok.refused, undefined);
+  assert.ok(ok.delivery?.verified, 'render did not deliver after the repair');
+  assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${mine.event_id}.json`)));
+  assert.equal(ch.remoteCommits(), before + 1);
+  assert.equal(deliverChannel(ch.dir, `github:${REPO}`, ME, 'direct again').pushed, false, 'a second delivery with nothing pending pushed');
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));

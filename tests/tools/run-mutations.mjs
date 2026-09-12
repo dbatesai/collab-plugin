@@ -110,6 +110,15 @@ export const MUTATIONS = [
   { id: 'M26 delivery treats a file contradicting a published JSONL line as an owned new event', file: H,
     find: "return !published || published.canonical === JSON.stringify(e);", replace: "return true;",
     tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M27 quarantine runs with a shadow present and targets a path rebuilt from the id (R3-H6)', file: 'skills/collab/scripts/collab-v1-quarantine.mjs',
+    find: "if (violations.length) { report.refused = { reason: 'event-filename-violation', paths: violations }; return report; }", replace: "",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M28 deliverChannel publishes with a shadow present (R3-M2)', file: H,
+    find: "    return { published_paths: [], foreign_paths: [], blocked: { reason: 'event-filename-violation', paths: violations }, pushed: false, verified: false };", replace: "    void 0;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M29 render writes output with a shadow present (R3-M2)', file: R,
+    find: "if (violations.length) return { refused: { reason: 'event-filename-violation', paths: violations }, blocked: null, conflicts: [], delivery: null };", replace: "",
+    tests: ['test-collab-git-delivery.mjs'] },
 ];
 
 function runOne(m) {

@@ -11,7 +11,7 @@ import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
   checkSafetyNets, deliverChannel, recordOwnedArtifact, readDeliveryManifest, isRecordedArtifact, gitBlobHash, gitUpstreamBlobs, gitBlobText,
-  gitUpstreamJsonl, EVENT_SOURCE,
+  gitUpstreamJsonl, EVENT_SOURCE, eventFilenameViolations,
   authorSlugFromTriplet, reconcileForeignSurface,
   renderEventsJsonl, measureVerdicts, openRequests,
   STALL_TICKS, TICK_INTERVAL_MS,
@@ -125,6 +125,10 @@ export async function render(slug, options = {}) {
   const { collabDir, author, dryRun = false, publish = true } = options;
   const dir = collabDir || findCollabDir(slug);
   if (!dir) throw new Error(`no collab directory: ${slug}`);
+  // Rendering is output. A file under events/ not named for its event is a hard stop here as
+  // everywhere: nothing is reconciled, written, recorded, or published while one is present.
+  const violations = eventFilenameViolations(dir);
+  if (violations.length) return { refused: { reason: 'event-filename-violation', paths: violations }, blocked: null, conflicts: [], delivery: null };
 
   // Import anything a legacy JSONL-only writer left in events.jsonl BEFORE rendering over
   // it. Rendering rebuilds that file from events/, so an unimported peer event would be
