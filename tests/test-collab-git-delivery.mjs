@@ -26,7 +26,7 @@ mkdirSync(process.env.COLLAB_REPOS_ROOT, { recursive: true });
 const { appendEvent, readEvents, deliveryManifestPath, eventFilenameViolations } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
 const { validateEvents } = await import('../skills/collab/scripts/collab-validate.mjs');
 const { render } = await import('../skills/collab/scripts/collab-render.mjs');
-const { quarantineInvalidV1Events } = await import('../skills/collab/scripts/collab-v1-quarantine.mjs');
+const { quarantineInvalidV1Events, quarantineEvent } = await import('../skills/collab/scripts/collab-v1-quarantine.mjs');
 const { deliverChannel } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
 const { tickDeterministic } = await import('../skills/collab/scripts/collab-tick.mjs');
 
@@ -718,6 +718,47 @@ test('boundaries: with a shadow present, direct render(), deliverChannel() and a
   assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${mine.event_id}.json`)));
   assert.equal(ch.remoteCommits(), before + 1);
   assert.equal(deliverChannel(ch.dir, `github:${REPO}`, ME, 'direct again').pushed, false, 'a second delivery with nothing pending pushed');
+});
+
+test('quarantine primitive: a supplied event that is not the bytes at its source cannot retarget canonical history; a violation anywhere in the channel refuses before mutation; the clean case still quarantines (R3-H6, residual)', async () => {
+  const slug = 'git-delivery-quarantine-primitive';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  sync(ch, 'peer turn');
+  const canonical = join(ch.dir, 'events', `${peer.event_id}.json`);
+  const canonicalBytes = readFileSync(canonical, 'utf8');
+  const snapshot = () => readdirSync(join(ch.dir, 'events')).sort();
+  const before = snapshot();
+
+  // 1. A shadow file exists: the primitive refuses before any mutation, whatever it is handed.
+  const shadowEvent = { ...JSON.parse(canonicalBytes), payload: { ...JSON.parse(canonicalBytes).payload, body: 'shadow ZZ-PRIM-1', schema_version: '1.0' } };
+  delete shadowEvent.payload.provenance;
+  writeFileSync(join(ch.dir, 'events', '000-shadow.json'), JSON.stringify(shadowEvent, null, 2));
+  assert.throws(() => quarantineEvent(ch.dir, shadowEvent, 'missing-provenance'), /event-filename-violation/);
+  assert.throws(() => quarantineEvent(ch.dir, shadowEvent, 'missing-provenance', { sourceName: `${peer.event_id}.json` }), /event-filename-violation/);
+  assert.deepEqual(snapshot(), [...before, '000-shadow.json'].sort(), 'the primitive mutated the directory with a violation present');
+  rmSync(join(ch.dir, 'events', '000-shadow.json'));
+
+  // 2. No violation, but the supplied object is not what is at its source: refused, nothing moved.
+  const tampered = { ...JSON.parse(canonicalBytes), payload: { ...JSON.parse(canonicalBytes).payload, body: 'tampered ZZ-PRIM-2', schema_version: '1.0' } };
+  delete tampered.payload.provenance;
+  assert.throws(() => quarantineEvent(ch.dir, tampered, 'missing-provenance'), /quarantine-source-mismatch/);
+  assert.throws(() => quarantineEvent(ch.dir, tampered, 'missing-provenance', { sourceName: `${peer.event_id}.json` }), /quarantine-source-mismatch/);
+  assert.deepEqual(snapshot(), before, 'the primitive retargeted canonical history from a mismatched supplied event');
+  assert.equal(readFileSync(canonical, 'utf8'), canonicalBytes);
+  assert.equal(readEvents(ch.dir).find(e => e.event_id === peer.event_id)?.payload.body, 'published peer critique');
+
+  // 3. Clean case: the supplied event IS the bytes at its source, and it is malformed → quarantined, only it.
+  const bad = { event_id: 'evt-bad-direct', ts: iso(T0 + 11 * MIN), author: R1, slug, type: 'turn', references: [],
+    payload: { schema_version: '1.0', intent: 'critique', body: 'declares v1 without provenance', signals: [] } };
+  writeFileSync(join(ch.dir, 'events', 'evt-bad-direct.json'), JSON.stringify(bad, null, 2));
+  const dst = quarantineEvent(ch.dir, JSON.parse(readFileSync(join(ch.dir, 'events', 'evt-bad-direct.json'), 'utf8')), 'missing-provenance');
+  assert.ok(dst && existsSync(dst));
+  const names = snapshot();
+  assert.ok(!names.includes('evt-bad-direct.json') && names.includes(`${peer.event_id}.json`));
+  assert.equal(JSON.parse(readFileSync(dst, 'utf8')).payload.body, 'declares v1 without provenance', 'the artifact must be written from the source bytes');
+  assert.equal(readFileSync(canonical, 'utf8'), canonicalBytes);
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));

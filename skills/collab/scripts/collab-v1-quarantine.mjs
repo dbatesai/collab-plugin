@@ -76,17 +76,32 @@ export function validateEventForRouting(event) {
 export function quarantineEvent(collabDir, event, reason, opts = {}) {
   const now = opts.now || (() => new Date().toISOString());
   const eventsDir = join(collabDir, 'events');
+  // Refuse before any mutation while the channel holds a file not named for its event —
+  // the same hard stop as every other write boundary, enforced here because this is an
+  // exported primitive that may be called directly.
+  const violations = eventFilenameViolations(collabDir);
+  if (violations.length) {
+    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything while a file under events/ is not named for the event it contains`);
+  }
   // The file this acts on is the file that was READ — never a path rebuilt from the event's
-  // id, which is untrusted input and could name somebody else's valid file.
+  // id, which is untrusted input and could name somebody else's valid file. The supplied
+  // event must BE the bytes at that source: a caller cannot retarget canonical history by
+  // handing this function an object that merely carries a published id.
   const sourceName = opts.sourceName || `${event.event_id}.json`;
   if (sourceName !== `${event.event_id}.json`) {
     throw new Error(`event-filename-violation: refusing to quarantine ${sourceName}, which is not named for the event it contains (${event.event_id})`);
   }
   const stem = sourceName.slice(0, -5);
   const src = join(eventsDir, sourceName);
+  if (!existsSync(src)) return null;
+  let atSource;
+  try { atSource = JSON.parse(readFileSync(src, 'utf8')); } catch { return null; }
+  if (JSON.stringify(atSource) !== JSON.stringify(event)) {
+    throw new Error(`quarantine-source-mismatch: the supplied event is not the bytes at events/${sourceName}; nothing was moved`);
+  }
   const dst = join(eventsDir, `.quarantined-${stem}.json`);
   const quarantined = {
-    ...event,
+    ...atSource,
     _quarantine: { reason, quarantined_at: now(), original_file: sourceName },
   };
   // Write the quarantine artifact first (atomic via tmp), then remove the source.

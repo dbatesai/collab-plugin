@@ -119,6 +119,13 @@ export const MUTATIONS = [
   { id: 'M29 render writes output with a shadow present (R3-M2)', file: R,
     find: "if (violations.length) return { refused: { reason: 'event-filename-violation', paths: violations }, blocked: null, conflicts: [], delivery: null };", replace: "",
     tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M30 quarantineEvent trusts the supplied object — a mismatched event retargets canonical history (R3-H6 residual)', file: 'skills/collab/scripts/collab-v1-quarantine.mjs',
+    find: "if (JSON.stringify(atSource) !== JSON.stringify(event)) {", replace: "if (false) {",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M31 quarantineEvent ignores channel-wide filename violations (R3-H6 residual)', file: 'skills/collab/scripts/collab-v1-quarantine.mjs',
+    find: "  const violations = eventFilenameViolations(collabDir);\n  if (violations.length) {\n    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything",
+    replace: "  const violations = [];\n  if (violations.length) {\n    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything",
+    tests: ['test-collab-git-delivery.mjs'] },
 ];
 
 function runOne(m) {

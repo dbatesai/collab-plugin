@@ -171,6 +171,14 @@ The legacy conflict fixes, migration, shadow refusal, and refusal/recovery all p
 
 Mutation controls: M27 (quarantine proceeds with a shadow present), M28 (`deliverChannel` publishes past the stop), M29 (`render` writes past the stop).
 
+## Round 3, tenth pass — Hale's review of `a179f20` (`hale-to-muse-ninth-candidate-primitive-boundary-2026-09-11-7af8a79.md`)
+
+R3-M2 closed by Hale; the H6 tick and scanner paths pass (48/48 on real remotes). H6 narrowed to the exported `quarantineEvent` primitive: called directly with an object parsed from a shadow (or any object carrying a published id), it defaulted its source from the supplied id, checked only the name string, and moved the canonical file. Red first (1 fail / 27), green after.
+
+- `quarantineEvent` now refuses before any mutation while any filename violation exists in the channel (the same hard stop as every other boundary, enforced in the primitive because it is exported), and refuses with `quarantine-source-mismatch` unless the supplied event is canonically equal to the parsed bytes at `events/<id>.json`; the artifact is written from the source bytes, not the supplied object. A caller can no longer retarget canonical history by handing the function an id it did not read. Test: shadow present → refused, nothing moved (with and without `sourceName`); no shadow but a tampered supplied object → refused, canonical untouched, reader unchanged; clean malformed same-name file → quarantined from source bytes, only it moves.
+
+Mutation controls: M30 (primitive trusts the supplied object), M31 (primitive ignores channel-wide violations). The receipts' boundary list now holds for the primitive as well; it is not declared an internal trusted primitive.
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.
