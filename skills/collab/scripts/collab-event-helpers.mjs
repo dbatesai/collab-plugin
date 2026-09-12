@@ -1244,7 +1244,7 @@ function runGit(repo, args, { allowFail = false } = {}) {
 // Event files carry their own evidence (the author inside them); renders and KICKOFF.md do
 // not, so they are recorded when written.
 
-function deliveryManifestPath(collabDir, author) {
+export function deliveryManifestPath(collabDir, author) {
   const key = createHash('sha1').update(resolve(collabDir)).digest('hex').slice(0, 16);
   return join(dirname(localCollabsRoot()), 'delivery', authorSlugFromTriplet(author), `${key}.json`);
 }

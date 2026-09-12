@@ -133,6 +133,15 @@ Mutation controls added: M18 (bytes-only ownership), M19 (renders from every loc
 
 Agy's spec verification (`agy-to-all-spec-verification-and-delivery-challenge-2026-09-11.md`) signs off on `b3fe8ab`; it states it is based on the posted reports rather than independent execution.
 
+## Round 3, sixth pass — Hale's review of `35cee72` (`hale-to-muse-fifth-candidate-retry-disclosure-2026-09-11-d05a481.md`)
+
+The three fifth-pass controls pass for Hale. One new H4 failure, reproduced and fixed tests-first, plus the manifest-evidence gaps he named.
+
+- **An edited published input contaminated a later retry.** The render's input filter accepted any event whose *path* the upstream held, so a local edit to a published peer turn was derived into recorded renders; delivery blocked on the raw edit, but once the edit was withdrawn the retry pushed the contaminated renders. `publishable(e)` now binds eligibility to bytes: an event the upstream holds counts only if the local file's blob hash equals the upstream blob; an event the upstream lacks counts only if this participant wrote it. That also covers a participant editing their own published event — author equality authorizes nothing about history. Tests: Hale's two-tick control (edit → tick blocks and derives nothing from the edit, edit preserved on disk → withdraw → tick pushes; no marker anywhere on the remote), and the own-author variant.
+- **Manifest evidence, as asked.** The corruption test now renders first, asserts the manifest file for that exact channel exists with `STATUS.md` and `events.jsonl` entries, corrupts that file, and asserts the close delivers while the unaccounted-for render is preserved and reported (`render_blocked`). A lost-update control simulates a concurrent writer landing last (manifest overwritten with a stale copy): the forgotten render is preserved on disk, reported, and not published. That is the whole recovery claim — a lost entry demotes, never promotes — and `deliveryManifestPath` is exported so a check can target the file.
+
+Mutation control added: M21 (published input eligible by path, not bytes). M19 retargeted to the new filter body.
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

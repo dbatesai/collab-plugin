@@ -23,7 +23,8 @@ process.env.COLLAB_LOCAL_ROOT = join(BASE, 'local');            // the ownership
 mkdirSync(process.env.COLLAB_REPOS_ROOT, { recursive: true });
 
 // Roots are read at import time in places, so import after the env is set.
-const { appendEvent, readEvents } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
+const { appendEvent, readEvents, deliveryManifestPath } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
+const { render } = await import('../skills/collab/scripts/collab-render.mjs');
 const { tickDeterministic } = await import('../skills/collab/scripts/collab-tick.mjs');
 
 const ME = 'core-framework@claude-code:host';
@@ -382,22 +383,95 @@ test('git/delivery: an unrecorded existing STATUS.md is preserved, the render bl
   assert.ok(!(remoteText(slug, 'STATUS.md') || '').includes('DRAFT-MARKER'), 'the draft reached the remote');
 });
 
-test('git/delivery: a corrupt ownership manifest fails safe — renders are not delivered, the close is, nothing throws', async () => {
+test('git/delivery: the ownership manifest for the channel exists after a render; corrupting THAT file fails safe — renders held, close delivered, nothing throws', async () => {
   const slug = 'git-delivery-manifest-corrupt';
   const T0 = Date.now() - 40 * MIN;
   const ch = mkGitChannel(slug, T0);
   ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
   sync(ch, 'proposal');
-  // A manifest written by an interrupted process: truncated JSON.
-  const dir = join(manifestDir(), 'core-framework');
-  mkdirSync(dir, { recursive: true });
-  const { readdirSync } = await import('node:fs');
-  for (const f of readdirSync(dir)) writeFileSync(join(dir, f), '{"STATUS.md": ["deadbeef');
+  await render(slug, { collabDir: ch.dir, author: ME, publish: false });       // establishes the manifest for this exact channel
+  const mp = deliveryManifestPath(ch.dir, ME);
+  const m = JSON.parse(readFileSync(mp, 'utf8'));
+  assert.ok(Array.isArray(m['STATUS.md']) && m['STATUS.md'].length === 1, `manifest for the subject channel not established: ${mp}`);
+  assert.ok(Array.isArray(m['events.jsonl']));
+  writeFileSync(mp, '{"STATUS.md": ["deadbeef');                                 // a torn write by an interrupted process
   const r = await tick(slug);
   assert.equal(r.action, 'close');
   const close = readEvents(ch.dir).find(e => e.type === 'close');
-  assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${close.event_id}.json`)));
+  assert.ok(ch.remoteFiles().some(f => f.endsWith(`events/${close.event_id}.json`)), 'the close was not delivered');
+  assert.ok(!ch.remoteFiles().some(f => f.endsWith(`2026-09-11-${slug}/STATUS.md`)), 'a render with no evidence was published');
+  assert.ok(r.render_blocked?.paths.includes('STATUS.md'), 'the unaccounted-for STATUS.md was not reported as preserved');
   assert.ok(r.delivery.verified);
+});
+
+test('git/delivery: a lost manifest update only demotes — the render it forgot is preserved and listed, never published', async () => {
+  const slug = 'git-delivery-manifest-lost-update';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'proposal');
+  const mp = deliveryManifestPath(ch.dir, ME);
+  await render(slug, { collabDir: ch.dir, author: ME, publish: false });
+  const stale = readFileSync(mp, 'utf8');                                         // a concurrent writer's view, taken now
+  const before = readFileSync(join(ch.dir, 'STATUS.md'));
+  ch.add(ME, 'turn', 21, { intent: 'clarify', body: 'a later note, so the next render differs', signals: [], state: 'working', owner: ME, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  await render(slug, { collabDir: ch.dir, author: ME, publish: false });         // a newer STATUS.md is written and recorded
+  const newer = readFileSync(join(ch.dir, 'STATUS.md'));
+  assert.equal(before.equals(newer), false, 'test setup: the two renders must differ');
+  writeFileSync(mp, stale);                                                       // the concurrent writer lands last: the newer entry is lost
+  const r = await tick(slug);                                                     // close route: render, then deliver
+  assert.equal(r.action, 'close');
+  assert.ok(r.render_blocked?.paths.includes('STATUS.md'), 'a render the manifest forgot must be preserved, not replaced');
+  assert.equal(readFileSync(join(ch.dir, 'STATUS.md')).equals(newer), true, 'the forgotten render was overwritten');
+  assert.ok(!ch.remoteFiles().some(f => f.endsWith(`2026-09-11-${slug}/STATUS.md`)), 'a forgotten render was published');
+  assert.ok(before.length > 0);
+});
+
+test('git/delivery: an edited published input never reaches the remote — not through the refused tick, not through the retry after the edit is withdrawn (R3-H4)', async () => {
+  const slug = 'git-delivery-edited-input-retry';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'peer turn and proposal');
+  const MARK = 'ZZ-EDITED-INPUT-MARKER-4c19';
+  const peerPath = join(ch.dir, 'events', `${peer.event_id}.json`);
+  const published = readFileSync(peerPath, 'utf8');
+  writeFileSync(peerPath, published.replace('published peer critique', `edited locally ${MARK}`));
+
+  const first = await tick(slug);                                                 // proposer ticks; R1's review never arrived → close
+  assert.equal(first.action, 'close');
+  assert.equal(first.delivery.blocked?.reason, 'modified-tracked-files');
+  assert.ok(readFileSync(peerPath, 'utf8').includes(MARK), 'the withdrawn-later edit must be preserved by us, not reverted');
+  for (const f of ['STATUS.md', 'events.jsonl']) {
+    assert.ok(!readFileSync(join(ch.dir, f), 'utf8').includes(MARK), `the edited input was derived into ${f}`);
+  }
+
+  writeFileSync(peerPath, published);                                             // the edit is withdrawn by its owner
+  const second = await tick(slug);
+  assert.equal(second.action, 'exit');
+  assert.equal(second.delivery.pushed, true);
+  for (const f of ch.remoteFiles().filter(f => f.includes(`2026-09-11-${slug}/`))) {
+    assert.ok(!(remoteShow(slug, f) || '').includes(MARK), `the edited input reached the remote through ${f}`);
+  }
+});
+
+test('git/delivery: an edited published event by the ticking participant is not an input either — author equality does not authorize rewriting history (R3-H4)', async () => {
+  const slug = 'git-delivery-edited-own-input';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const mine = ch.add(ME, 'turn', 10, { intent: 'propose', body: 'my published turn', signals: [], state: 'working', owner: ME, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'own turn and proposal');
+  const MARK = 'ZZ-OWN-EDIT-MARKER-e2b7';
+  const p = join(ch.dir, 'events', `${mine.event_id}.json`);
+  writeFileSync(p, readFileSync(p, 'utf8').replace('my published turn', `rewritten ${MARK}`));
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.equal(r.delivery.blocked?.reason, 'modified-tracked-files');
+  assert.ok(!readFileSync(join(ch.dir, 'events.jsonl'), 'utf8').includes(MARK), 'an edited own event was derived into events.jsonl');
+  assert.ok(!(readFileSync(join(ch.dir, 'STATUS.md'), 'utf8')).includes(MARK));
+  assert.ok(readFileSync(p, 'utf8').includes(MARK), 'the edit was reverted instead of preserved');
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));

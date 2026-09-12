@@ -148,7 +148,18 @@ export async function render(slug, options = {}) {
   const bounded = Boolean(author) && isGitTransport(transport);
   const upstream = bounded ? gitUpstreamBlobs(dir, transport) : new Map();
   const manifest = author ? readDeliveryManifest(dir, author) : {};
-  const publishable = (e) => !bounded || e.author === author || upstream.has(join('events', `${e.event_id}.json`));
+  // An input is publishable by its exact bytes: an event the upstream holds counts only if
+  // the local file still IS the published blob (an edit to published history is not an
+  // input, whoever wrote it — author equality does not authorize rewriting), and an event
+  // the upstream lacks counts only if this participant wrote it.
+  const publishable = (e) => {
+    if (!bounded) return true;
+    const relPath = join('events', `${e.event_id}.json`);
+    if (upstream.has(relPath)) {
+      try { return gitBlobHash(readFileSync(join(dir, relPath))) === upstream.get(relPath); } catch { return false; }
+    }
+    return e.author === author;
+  };
   const events = all.filter(publishable);
   const preserved = [];
   const mayReplace = (relPath) => {

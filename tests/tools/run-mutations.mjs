@@ -84,11 +84,15 @@ export const MUTATIONS = [
     replace: "return Object.values(manifest).flat().includes(blobHash);",
     tests: ['test-collab-git-delivery.mjs'] },
   { id: 'M19 renders are derived from every local event — an unpublished foreign event travels through them (R3-H4)', file: R,
-    find: "const publishable = (e) => !bounded || e.author === author || upstream.has(join('events', `${e.event_id}.json`));",
-    replace: "const publishable = () => true;",
+    find: "    if (!bounded) return true;\n    const relPath = join('events', `${e.event_id}.json`);",
+    replace: "    return true;\n    const relPath = join('events', `${e.event_id}.json`);",
     tests: ['test-collab-git-delivery.mjs'] },
   { id: 'M20 renders overwrite whatever is there — an unrecorded existing file is destroyed (R3-H4)', file: R,
     find: "if (!bounded || !existsSync(p)) return true;", replace: "return true;",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M21 a published input is eligible by path, not bytes — an edited published event is derived into renders (R3-H4)', file: R,
+    find: "try { return gitBlobHash(readFileSync(join(dir, relPath))) === upstream.get(relPath); } catch { return false; }",
+    replace: "return true;",
     tests: ['test-collab-git-delivery.mjs'] },
 ];
 
