@@ -126,6 +126,10 @@ export const MUTATIONS = [
     find: "  const violations = eventFilenameViolations(collabDir);\n  if (violations.length) {\n    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything",
     replace: "  const violations = [];\n  if (violations.length) {\n    throw new Error(`event-filename-violation: ${violations.join(', ')} — refusing to quarantine anything",
     tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M32 pull depends on the user\'s rebase.autostash — a dirty tree makes the tick throw instead of blocking (CI on PR #6)', file: 'skills/collab/scripts/collab-event-helpers.mjs',
+    find: "runGit(repo, ['pull', '--rebase', '--autostash']);",
+    replace: "runGit(repo, ['pull', '--rebase']);",
+    tests: ['test-collab-git-delivery.mjs'] },
 ];
 
 function runOne(m) {

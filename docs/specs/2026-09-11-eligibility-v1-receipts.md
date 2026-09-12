@@ -179,6 +179,15 @@ R3-M2 closed by Hale; the H6 tick and scanner paths pass (48/48 on real remotes)
 
 Mutation controls: M30 (primitive trusts the supplied object), M31 (primitive ignores channel-wide violations). The receipts' boundary list now holds for the primitive as well; it is not declared an internal trusted primitive.
 
+## Eleventh pass — CI on PR #6 (2026-09-12, Linux runner)
+
+CI failed 6/462 on `54e7ed8` while the local suite was 462/462. Two causes, both environmental dependencies the local run had hidden:
+
+- **Five delivery tests** (modified tracked file, unrelated staged entry, edited published input ×2, edited peer file) threw `git pull failed … cannot pull with rebase: You have unstaged changes`. `gitPullRebase` ran a plain `git pull --rebase`; on the developer's machine `~/.gitconfig` had `rebase.autostash true`, on the runner it did not. The product depended on user config. Fix: `--autostash` is passed explicitly, with the stash-pop-conflict ceiling stated in a comment. The test file now runs every git call, product included, against an empty `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM=1`, so the red reproduces locally (5/27 before the fix, 27/27 after). Mutation control **M32** removes `--autostash` and is caught.
+- **`test-collab-rejected-join-authorization.mjs`** (on `next` since July, not this branch) imported the helpers through a hardcoded `/Users/dbates/…` path when `COLLAB_SRC` was unset. Now resolves relative to the test file. `next` had been red on this file before this PR; the PR body did not say so and should have.
+
+Full suite 462/462 (`node --test tests/test-*.mjs`, `~/Documents/Projects/collab-plugin`); mutation controls 32/32 caught (`node tests/tools/run-mutations.mjs`). The claim "462/462" in earlier passes was true on one machine's git config and is now true against an empty one.
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

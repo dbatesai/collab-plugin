@@ -22,9 +22,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const SRC = process.env.COLLAB_SRC
-  || '/Users/dbates/Documents/Projects/collab-plugin/skills/collab/scripts';
+  || fileURLToPath(new URL('../skills/collab/scripts', import.meta.url));
 
 const { appendEvent, readEvents, reconcileForeignSurface } =
   await import(join(SRC, 'collab-event-helpers.mjs'));

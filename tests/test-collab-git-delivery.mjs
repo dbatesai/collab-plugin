@@ -21,6 +21,12 @@ process.env.COLLAB_REPOS_ROOT = join(BASE, 'projects');
 process.env.COLLAB_STATE_ROOT = join(BASE, 'state');
 process.env.COLLAB_LOCAL_ROOT = join(BASE, 'local');            // the ownership manifest lives beside it, not in ~/.collab
 mkdirSync(process.env.COLLAB_REPOS_ROOT, { recursive: true });
+// The plugin's git behavior must not depend on the developer's ~/.gitconfig (rebase.autostash
+// made five dirty-tree tests pass locally and fail in CI). Every git call in this file and in
+// the product under test runs against an empty global config and no system config.
+writeFileSync(join(BASE, 'gitconfig'), '');
+process.env.GIT_CONFIG_GLOBAL = join(BASE, 'gitconfig');
+process.env.GIT_CONFIG_NOSYSTEM = '1';
 
 // Roots are read at import time in places, so import after the env is set.
 const { appendEvent, readEvents, deliveryManifestPath, eventFilenameViolations } = await import('../skills/collab/scripts/collab-event-helpers.mjs');

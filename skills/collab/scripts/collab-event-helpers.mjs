@@ -1239,7 +1239,13 @@ export function gitPullRebase(transport, owner = `pid-${process.pid}`) {
   const repo = repoForTransport(transport);
   // Throws rather than returning empty: a caller that swallows this reports a quiet
   // channel, which is indistinguishable from no peer activity.
-  return withRepoClaim(repo, owner, () => { runGit(repo, ['pull', '--rebase']); });
+  // --autostash is explicit: a dirty working tree (a modified tracked file, an edited published
+  // event) must be preserved through the pull so the delivery boundary can see and block on it.
+  // Without the flag the behavior depends on the user's rebase.autostash setting, and a plain
+  // `git pull --rebase` refuses on unstaged changes.
+  // ponytail: a stash pop that conflicts with upstream leaves the stash in place and the file
+  // in conflict state; the tick then blocks on the modified file as it would on any edit.
+  return withRepoClaim(repo, owner, () => { runGit(repo, ['pull', '--rebase', '--autostash']); });
 }
 
 // Every git call goes through here. An unchecked spawnSync discards status, signal and
