@@ -595,4 +595,41 @@ test('git/delivery: an edited published peer FILE also keeps the published conte
   assert.ok(r.render_conflicts?.some(c => c.event_id === peer.event_id));
 });
 
+test('git/delivery: after the refusal, renaming the offending file lets the next tick complete once — no duplicate close, no unrelated publication, obligations intact; a clean channel never refuses', async () => {
+  const slug = 'git-delivery-refusal-recovery';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const peer = ch.add(R1, 'turn', 10, { intent: 'critique', body: 'published peer critique', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) });
+  ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });
+  sync(ch, 'peer turn and proposal');
+  const before = ch.remoteCommits();
+  // A real event of mine that arrived under the wrong name — the operator's fix is a rename, not a delete.
+  const mine = { event_id: 'evt-mine-late', ts: iso(T0 + 21 * MIN), author: ME, slug, type: 'turn', references: [],
+    payload: { schema_version: '1.0', provenance: { emit_mode: 'interactive', harness: 'claude-code' }, intent: 'clarify', body: 'a late note of mine', signals: [], state: 'working', owner: ME, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) } };
+  writeFileSync(join(ch.dir, 'events', 'late-note.json'), JSON.stringify(mine, null, 2));
+  writeFileSync(join(ch.dir, 'private-draft.txt'), 'still private\n');
+
+  const refused = await tick(slug);
+  assert.equal(refused.action, 'refused');
+  assert.deepEqual(refused.paths, ['events/late-note.json']);
+  assert.ok(!JSON.stringify(refused).includes('a late note of mine'), 'the diagnostic exposed the offending file\'s body');
+  assert.equal(ch.remoteCommits(), before);
+  assert.deepEqual(readEvents(ch.dir).filter(e => e.type === 'close'), []);
+
+  // The operator resolves it the honest way: the file is named for the event it contains.
+  const { renameSync } = await import('node:fs');
+  renameSync(join(ch.dir, 'events', 'late-note.json'), join(ch.dir, 'events', `${mine.event_id}.json`));
+  const r = await tick(slug);
+  assert.equal(r.action, 'close', 'the retry did not complete after the operator fixed the file');
+  assert.equal(readEvents(ch.dir).filter(e => e.type === 'close').length, 1);
+  const remote = ch.remoteFiles();
+  assert.ok(remote.some(f => f.endsWith(`events/${mine.event_id}.json`)), 'my renamed event was not delivered');
+  assert.ok(!remote.some(f => f.endsWith('private-draft.txt')), 'the retry published unrelated work');
+  assert.ok((remoteText(slug, 'events.jsonl') || '').includes('published peer critique'), 'published history was lost across the failure');
+  assert.equal(ch.remoteCommits(), before + 1);
+  assert.equal((await tick(slug)).action, 'exit');
+  assert.equal(ch.remoteCommits(), before + 1, 'a further tick published again');
+  assert.ok(peer, 'setup');
+});
+
 test.after(() => rmSync(BASE, { recursive: true, force: true }));
