@@ -10,7 +10,7 @@ import {
   existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync,
 } from 'node:fs';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { join, resolve, dirname } from 'node:path';
+import { join, resolve, dirname, relative, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -1234,12 +1234,74 @@ function runGit(repo, args, { allowFail = false } = {}) {
 }
 
 /**
- * Paths under `collabDir` that the working copy holds but the branch does not — records an
- * interrupted tick appended and never published. A local file is not remote delivery.
+ * Deliver what this participant owes the branch, and nothing else.
+ *
+ * Two boundaries, kept separate. The publisher stages only records it can claim: files under
+ * `events/` whose name is their event id and whose author is `author` — an interrupted tick's
+ * chase, timeout record, or wait-cycle notice. Everything else in the channel is left exactly
+ * as found: another participant's unpublished file and a stray draft are reported as foreign
+ * and never staged; a modified or deleted tracked file blocks delivery outright, because a
+ * push over a hand edit to committed history is not this tick's to make. The commit is
+ * `--only` the owned paths, so an unrelated index entry stays staged and uncommitted.
+ *
+ * The retry gate looks past the working tree: a clean tree is not a delivery receipt. Any
+ * commit ahead of the upstream is inspected; if every one touches only this channel it is
+ * pushed, and if any touches something else the push is blocked and the commit preserved.
+ * Delivery is verified against the upstream ref after the push, not assumed from exit 0.
  */
-export function gitPendingPaths(collabDir, transport) {
+export function deliverChannel(collabDir, transport, author, message, owner = `pid-${process.pid}`) {
   const repo = repoForTransport(transport);
-  return runGit(repo, ['status', '--porcelain', '--', collabDir]).stdout.split('\n').filter(Boolean).map(l => l.slice(3));
+  const rel = relative(repo, collabDir);
+  const eventsRel = join(rel, 'events');
+  return withRepoClaim(repo, owner, () => {
+    const status = runGit(repo, ['status', '--porcelain', '--untracked-files=all', '--', collabDir]).stdout.split('\n').filter(Boolean);
+    const owned = [], foreign = [], modified = [];
+    for (const line of status) {
+      const code = line.slice(0, 2), path = line.slice(3);
+      if (code !== '??' && code !== 'A ') { modified.push(path); continue; }
+      const base = basename(path);
+      if (dirname(path) === eventsRel && base.endsWith('.json') && !base.startsWith('.')) {
+        try {
+          const e = JSON.parse(readFileSync(join(repo, path), 'utf8'));
+          if (e?.event_id === base.slice(0, -5) && e?.author === author) { owned.push(path); continue; }
+        } catch { /* not an event: foreign */ }
+      }
+      foreign.push(path);
+    }
+    const result = { published_paths: [], foreign_paths: foreign, blocked: null, pushed: false, verified: false };
+    const verify = () => { result.verified = runGit(repo, ['rev-parse', 'HEAD']).stdout.trim() === runGit(repo, ['rev-parse', '@{u}'], { allowFail: true }).stdout.trim(); };
+
+    if (modified.length) {
+      result.blocked = { reason: 'modified-tracked-files', paths: modified };
+      verify();
+      return result;
+    }
+    if (owned.length) {
+      runGit(repo, ['add', '--', ...owned]);
+      runGit(repo, ['commit', '--only', '-m', message, '--', ...owned]);
+      result.published_paths = owned;
+    }
+
+    const upstream = runGit(repo, ['rev-parse', '--abbrev-ref', '@{u}'], { allowFail: true });
+    if (!upstream.ok) { result.blocked = { reason: 'no-upstream', paths: [] }; return result; }
+    const ahead = runGit(repo, ['rev-list', '@{u}..HEAD']).stdout.split('\n').filter(Boolean);
+    const unrelated = ahead.filter(sha => runGit(repo, ['diff-tree', '--no-commit-id', '--name-only', '-r', sha]).stdout
+      .split('\n').filter(Boolean).some(p => p !== rel && !p.startsWith(rel + '/')));
+    if (unrelated.length) {
+      result.blocked = { reason: 'unrelated-unpushed-commits', paths: unrelated };
+      verify();
+      return result;
+    }
+    if (ahead.length) {
+      for (let i = 1; i <= 3; i++) {
+        if (runGit(repo, ['push'], { allowFail: true }).ok) { result.pushed = true; break; }
+        runGit(repo, ['pull', '--rebase']);
+      }
+      if (!result.pushed) throw new Error(`git push failed after 3 attempts in ${repo}`);
+    }
+    verify();
+    return result;
+  });
 }
 
 export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${process.pid}`) {

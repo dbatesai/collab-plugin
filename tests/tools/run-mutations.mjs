@@ -66,6 +66,13 @@ export const MUTATIONS = [
   { id: 'M13 silence credits a measure (a required reviewer implicitly ratifies)', file: H,
     find: 'if (required.has(agent)) continue;', replace: '',
     tests: ['test-collab-peer-silence-terminal.mjs'] },
+  { id: 'M14 the publisher ignores authorship — a foreign event is delivered (R3-H4)', file: H,
+    find: "if (e?.event_id === base.slice(0, -5) && e?.author === author) { owned.push(path); continue; }",
+    replace: "if (e?.event_id === base.slice(0, -5)) { owned.push(path); continue; }",
+    tests: ['test-collab-git-delivery.mjs'] },
+  { id: 'M15 the retry gate trusts a clean tree — a committed-but-unpushed record is never delivered (R3-H3)', file: H,
+    find: 'if (ahead.length) {', replace: 'if (owned.length) {',
+    tests: ['test-collab-git-delivery.mjs'] },
 ];
 
 function runOne(m) {

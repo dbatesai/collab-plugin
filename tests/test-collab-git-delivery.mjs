@@ -11,7 +11,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -122,6 +122,117 @@ test('git/delivery: a record left behind by an interrupted tick is published by 
   // Only the channel's own files travelled: nothing outside collabs/ was touched.
   const changed = git(ch.repo, 'diff', '--name-only', 'HEAD~1', 'HEAD').split('\n');
   assert.ok(changed.every(f => f.startsWith('collabs/')), `unrelated files in the publish commit: ${changed.join(', ')}`);
+});
+
+
+// ------------------------------------------------------------ the two delivery boundaries (R3-H3 after-commit, R3-H4 ownership)
+
+/** A timeout record the real emitter would have written, as a file (the interrupted-tick shape). */
+function orphanRecord(ch, slug, T0, id = 'evt-timeout-orphan') {
+  const rec = { event_id: id, ts: iso(T0 + 11 * MIN), author: ME, slug, type: 'timeout-action', references: [],
+    payload: { schema_version: '1.0', provenance: { emit_mode: 'automated', harness: 'obligation-scanner' }, action: 'proceed-alone', participant: ME, for_deadline: iso(T0 + 10 * MIN), chases_so_far: 0, signals: ['timeout-executed', 'proceed-alone'] } };
+  writeFileSync(join(ch.dir, 'events', `${id}.json`), JSON.stringify(rec, null, 2));
+  return rec;
+}
+const request = (ch) => ch.add(ME, 'turn', 5, { intent: 'probe', body: 'please review M-A', signals: [], state: 'blocked', owner: R1, waiting_on: R1 });
+const sync = (ch, msg = 'sync') => { git(ch.repo, 'add', '.'); git(ch.repo, 'commit', '-q', '-m', msg); git(ch.repo, 'push', '-q'); };
+const upstreamMatchesHead = (ch) => git(ch.repo, 'rev-parse', 'HEAD') === git(ch.repo, 'rev-parse', '@{u}');
+
+test('git/delivery: a record committed but not pushed by an interrupted tick is delivered by the next tick — a clean tree is not a delivery receipt (R3-H3)', async () => {
+  const slug = 'git-delivery-after-commit';
+  const T0 = Date.now() - 12 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  request(ch); sync(ch, 'request');
+  const before = ch.remoteCommits();
+  orphanRecord(ch, slug, T0);
+  git(ch.repo, 'add', '.'); git(ch.repo, 'commit', '-q', '-m', 'tick: 1 timeout-action (push never happened)');
+  assert.equal(ch.dirty(), '', 'test setup: the tree should be clean');
+  assert.equal(ch.remoteCommits(), before, 'test setup: the remote should be behind');
+
+  const r = await tick(slug);
+  assert.equal(r.timeout_actions_executed, 0, 'the settled deadline executed again');
+  assert.equal(readEvents(ch.dir).filter(e => e.type === 'timeout-action').length, 1);
+  assert.ok(ch.remoteFiles().some(f => f.endsWith('events/evt-timeout-orphan.json')), 'the committed record never reached the remote');
+  assert.equal(ch.remoteCommits(), before + 1, 'delivery must push the existing commit, not make another');
+  assert.ok(upstreamMatchesHead(ch), 'delivery was not verified against the upstream ref');
+  assert.equal(r.delivery.pushed, true);
+  assert.equal(r.delivery.verified, true);
+});
+
+test('git/delivery: an unrelated draft and a foreign author\'s file under the channel are never published; an owned record beside them is (R3-H4)', async () => {
+  const slug = 'git-delivery-ownership';
+  const T0 = Date.now() - 12 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  request(ch); sync(ch, 'request');
+  const before = ch.remoteCommits();
+  writeFileSync(join(ch.dir, 'private-draft.txt'), 'not for anyone yet\n');
+  mkdirSync(join(ch.dir, 'notes'), { recursive: true });
+  writeFileSync(join(ch.dir, 'notes', 'scratch.md'), '# scratch\n');
+  const foreign = { event_id: 'evt-foreign', ts: iso(T0 + 6 * MIN), author: R1, slug, type: 'turn', references: [],
+    payload: { schema_version: '1.0', provenance: { emit_mode: 'interactive', harness: 'codex' }, intent: 'clarify', body: 'a peer\'s unpublished turn on this shared clone', signals: [], state: 'working', owner: R1, waiting_on: null, next_update_by: iso(T0 + 120 * MIN) } };
+  writeFileSync(join(ch.dir, 'events', 'evt-foreign.json'), JSON.stringify(foreign, null, 2));
+
+  const r = await tick(slug);                       // ME's own bound is due → one owned record written this tick
+  assert.equal(r.timeout_actions_executed, 1);
+  const ta = readEvents(ch.dir).find(e => e.type === 'timeout-action');
+  const remote = ch.remoteFiles();
+  assert.ok(remote.some(f => f.endsWith(`events/${ta.event_id}.json`)), 'the owned record was not delivered');
+  assert.ok(!remote.some(f => f.endsWith('private-draft.txt')), 'an unselected draft was published');
+  assert.ok(!remote.some(f => f.endsWith('notes/scratch.md')), 'an unselected draft was published');
+  assert.ok(!remote.some(f => f.endsWith('events/evt-foreign.json')), 'another participant\'s file was published by this tick');
+  assert.equal(readFileSync(join(ch.dir, 'private-draft.txt'), 'utf8'), 'not for anyone yet\n', 'the draft bytes were touched');
+  assert.equal(readFileSync(join(ch.dir, 'events', 'evt-foreign.json'), 'utf8'), JSON.stringify(foreign, null, 2));
+  assert.equal(ch.remoteCommits(), before + 1);
+  assert.deepEqual(r.delivery.foreign_paths.map(p => p.split('/').slice(-1)[0]).sort(), ['evt-foreign.json', 'private-draft.txt', 'scratch.md']);
+  // A later quiet tick still leaves them alone.
+  const again = await tick(slug);
+  assert.equal(again.published_paths, 0);
+  assert.equal(ch.remoteCommits(), before + 1);
+});
+
+test('git/delivery: a modified tracked file under the channel blocks delivery explicitly and is preserved; nothing is pushed (R3-H4)', async () => {
+  const slug = 'git-delivery-modified';
+  const T0 = Date.now() - 12 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  request(ch); sync(ch, 'request');
+  const before = ch.remoteCommits();
+  const edited = join(ch.dir, 'events', 'evt-002.json');           // ME's join, already on the remote
+  const original = readFileSync(edited, 'utf8');
+  writeFileSync(edited, original.replace('"own"', '"own (edited by hand)"'));
+
+  const r = await tick(slug);
+  assert.equal(r.timeout_actions_executed, 1, 'the bound still executes locally; delivery is what is blocked');
+  assert.ok(r.delivery.blocked, 'a hand-edited committed event did not block delivery');
+  assert.ok(r.delivery.blocked.paths.some(p => p.endsWith('events/evt-002.json')));
+  assert.equal(ch.remoteCommits(), before, 'something was pushed past a blocked delivery');
+  assert.equal(readFileSync(edited, 'utf8'), original.replace('"own"', '"own (edited by hand)"'), 'the edit was not preserved');
+});
+
+test('git/delivery: an unrelated staged entry is not committed by the tick, and an unrelated unpushed commit blocks the push and is preserved (R3-H4)', async () => {
+  const slug = 'git-delivery-unrelated';
+  const T0 = Date.now() - 12 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  request(ch); sync(ch, 'request');
+  const before = ch.remoteCommits();
+  // Unrelated index entry: README edited and staged by someone, outside the channel.
+  writeFileSync(join(ch.repo, 'README.md'), 'test repo\nedited\n');
+  git(ch.repo, 'add', 'README.md');
+
+  const r = await tick(slug);
+  assert.equal(r.timeout_actions_executed, 1);
+  assert.equal(git(ch.repo, 'diff', '--cached', '--name-only'), 'README.md', 'the unrelated staged entry was consumed or dropped');
+  assert.ok(!ch.remoteFiles().includes('README.md') || git(BASE, '--git-dir', join(BASE, `${slug}-remote.git`), 'show', 'main:README.md') === 'test repo', 'the unrelated staged edit reached the remote');
+  assert.equal(ch.remoteCommits(), before + 1, 'the owned record should still have been delivered on its own');
+
+  // Unrelated unpushed commit: someone committed outside the channel and did not push.
+  git(ch.repo, 'commit', '-q', '-m', 'unrelated local work');
+  const localHead = git(ch.repo, 'rev-parse', 'HEAD');
+  orphanRecord(ch, slug, T0, 'evt-timeout-orphan-2');           // and this tick has owned work of its own... but it is settled, so nothing new executes
+  const r2 = await tick(slug);
+  assert.ok(r2.delivery.blocked, 'an unrelated unpushed commit did not block the push');
+  assert.equal(ch.remoteCommits(), before + 1, 'the unrelated commit was pushed');
+  assert.equal(git(ch.repo, 'log', '-1', '--format=%s', localHead), 'unrelated local work', 'the unrelated commit was not preserved');
+  assert.ok(git(ch.repo, 'rev-list', '@{u}..HEAD').split('\n').filter(Boolean).length >= 1);
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));

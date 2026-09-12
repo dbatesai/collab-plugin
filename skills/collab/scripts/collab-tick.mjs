@@ -21,7 +21,7 @@ import {
   getJoinedAgents, computeCloseOutcome, validateMeasures,
   openRequests, waitCycles, evaluateObligations, executeTimeoutAction, isSystemTurn,
   OBLIGATION_GRACE_MS,
-  gitPullRebase, gitCommitPush, gitPendingPaths,
+  gitPullRebase, gitCommitPush, deliverChannel,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
 } from './collab-event-helpers.mjs';
@@ -286,29 +286,25 @@ export async function tickDeterministic(slug, options = {}) {
     }
   }
 
-  // Delivery. One publish for everything this tick wrote — chases, timeout records, wait-cycle
-  // notices — plus anything an interrupted tick left in the working copy: a record on disk
-  // that never reached the branch is not delivered, and the next tick owes it. A tick with
-  // nothing pending commits nothing.
-  let published = [];
+  // Delivery. One publish for the records this participant wrote — this tick's chases,
+  // timeout records, and wait-cycle notices, plus any of its own an interrupted tick left
+  // behind, uncommitted or committed-but-unpushed. Nothing else in the channel is staged;
+  // a hand edit to committed history or an unrelated unpushed commit blocks the push and is
+  // reported. A record that never reached the branch is not delivered, and the next tick owes it.
+  let delivery = null;
   if (!dryRun && isGitTransport(transport)) {
-    published = gitPendingPaths(dir, transport);
-    if (published.length) {
-      const parts = [];
-      if (chaseEvents.length) parts.push(`${chaseEvents.length} chase`);
-      if (timeoutActions.length) parts.push(`${timeoutActions.length} timeout-action`);
-      if (newCycles.length) parts.push(`${newCycles.length} wait-cycle`);
-      const carried = published.length - chaseEvents.length - timeoutActions.length - newCycles.length;
-      if (carried > 0) parts.push(`${carried} pending record(s) from an earlier tick`);
-      gitCommitPush(dir, transport, `[${triplet}] tick: ${parts.join(', ') || 'publish pending'} ${slug}`);
-    }
+    const parts = [];
+    if (chaseEvents.length) parts.push(`${chaseEvents.length} chase`);
+    if (timeoutActions.length) parts.push(`${timeoutActions.length} timeout-action`);
+    if (newCycles.length) parts.push(`${newCycles.length} wait-cycle`);
+    delivery = deliverChannel(dir, transport, triplet, `[${triplet}] tick: ${parts.join(', ') || 'publish pending'} ${slug}`);
   }
 
   // LLM-decision routes: return a hint, let the agent take over
   return {
     action: 'agent-decision-needed', route, triplet, slug,
     chase_events_emitted: chaseEvents.length, timeout_actions_executed: dryRun ? 0 : timeoutActions.length,
-    published_paths: published.length, open_requests, wait_cycles,
+    published_paths: delivery ? delivery.published_paths.length : 0, delivery, open_requests, wait_cycles,
   };
 }
 

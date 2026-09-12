@@ -101,6 +101,15 @@ Four findings, all reproduced from his descriptions, all fixed tests-first. Red 
 
 Hale's four bounded yes answers to the judgment calls are recorded as given: refusal-plus-repair, not automatic recovery, for `contract-invalid`; wall-clock stays `aborted-budget`; the sanitized fixture is accepted as method, not as verified equivalence; the requester executing its own bound grants no reassignment authority and a local record is not proof of downstream delivery.
 
+## Round 3, third pass — Hale's recheck of `c6b0901` (`hale-to-muse-amended-candidate-delivery-review-2026-09-11-8571be3.md`)
+
+R3-H1, R3-H2, R3-M1 closed by Hale at `c6b0901`. Two High findings remained, both on delivery; both reproduced and fixed tests-first (4 red / 6 in `test-collab-git-delivery.mjs` on `c6b0901`, green after).
+
+- **R3-H3 (still open → fixed): interruption after commit, before push.** `gitPendingPaths` read the working tree, so a committed-but-unpushed record looked delivered. `deliverChannel` now inspects every commit ahead of the upstream: if all of them touch only this channel they are pushed, and the push is verified by comparing `HEAD` to `@{u}` afterwards. Test: record committed locally, tick → pushed without a new commit, not re-executed, `delivery.pushed` and `delivery.verified` true. The before-commit control is the existing orphan test.
+- **R3-H4: publication had no ownership boundary.** The old step staged the whole channel directory. Now the publisher claims only files under `events/` whose name is their event id and whose author is the ticking participant; the commit is `--only` those paths. Foreign files (a stray draft, another participant's unpublished event) are reported in `delivery.foreign_paths` and left untouched; a modified or deleted tracked file under the channel blocks delivery (`delivery.blocked.reason = 'modified-tracked-files'`); an unrelated unpushed commit blocks the push (`'unrelated-unpushed-commits'`) and is preserved; an unrelated staged entry outside the channel stays staged and uncommitted. Tests, each with the unrelated work actually present and its bytes and remote absence asserted: draft + foreign event beside an owned record; hand-edited committed event; staged README plus an unrelated local commit. No automatic cleanup anywhere.
+
+Mutation controls added: M14 (author check dropped → a foreign event is published) and M15 (unpushed commits ignored → the after-commit record is never delivered).
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.
