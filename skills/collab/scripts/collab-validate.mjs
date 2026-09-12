@@ -4,11 +4,20 @@
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { findCollabDir, readEvents } from './collab-event-helpers.mjs';
+import { findCollabDir, readEvents, validateMeasures, eventFilenameViolations } from './collab-event-helpers.mjs';
 
-const VALID_TYPES = ['kickoff','join','decline','turn','propose-close','ratify','object','withdraw','close'];
+// Participant-authored types, then the three the system writes for itself:
+// `reconciled` on a healed foreign surface, `quarantined` on a rejected v1 event,
+// `timeout-action` when a declared timeout policy executes.
+const VALID_TYPES = ['kickoff','join','decline','turn','propose-close','ratify','object','withdraw','close',
+                     'reconciled','quarantined','timeout-action'];
 const VALID_INTENTS = ['propose','critique','probe','synthesize','clarify'];
-const VALID_OUTCOMES = ['converged','aborted-stall','aborted-budget','aborted-objection','aborted-david'];
+// `converged` and the `aborted-*` family, then the two honest terminal modes for a goal
+// that ran the ladder out: `complete-to-authority-boundary` (work landed, but a ratified
+// completion measure has no review attached) and `failed-safely` (the goal did not
+// complete, and nothing was left broken or half-written).
+const VALID_OUTCOMES = ['converged','aborted-stall','aborted-budget','aborted-objection','aborted-david',
+                        'complete-to-authority-boundary','failed-safely'];
 const TRANSPORT_RE = /^(localhost|github:[a-z0-9_-]+)$/;
 const SEMVER_RE = /^\d+\.\d+\.\d+$/;
 const REQUIRED_PAYLOAD = {
@@ -18,11 +27,52 @@ const REQUIRED_PAYLOAD = {
   ratify: [], object: ['reason'], withdraw: [], close: ['final_synthesis','outcome'],
 };
 
-export function validateEvents(events) {
+export function validateEvents(events, { collabDir } = {}) {
   const errors = [], warnings = [], seenIds = new Set();
+  if (collabDir) for (const p of eventFilenameViolations(collabDir)) errors.push(`event-filename-violation: ${p} is not named for the event it contains`);
+  // Eligibility v1 state, in ledger order. `declared` is the kickoff's measure list; `judged`
+  // records only SCOPED verdicts per author, so a legacy ledger (bare verdicts) can never
+  // produce a new error here — interpret by shape, guarantee at write.
+  const declared = new Map();
+  const judged = new Map();
+  const owedBy = (author) => [...declared.values()].filter(m => m.requires_review_from === author).map(m => m.id);
   for (let i = 0; i < events.length; i++) {
     const e = events[i];
     const tag = `evt[${i}]${e.event_id ? ' ' + e.event_id : ''}`;
+    if (e.type === 'kickoff' && Array.isArray(e.payload?.ratified_completion_measures)) {
+      for (const m of e.payload.ratified_completion_measures) if (m && typeof m.id === 'string') declared.set(m.id, m);
+      for (const err of validateMeasures(e.payload.ratified_completion_measures)) errors.push(`${tag} ${err}`);
+    }
+    if (e.type === 'join' && declared.size && 'owes_review' in (e.payload || {})) {
+      const ack = Array.isArray(e.payload.owes_review) ? e.payload.owes_review : [];
+      for (const id of ack) {
+        if (!declared.has(id)) errors.push(`${tag} measure-unknown: ${id}`);
+        else if (declared.get(id).requires_review_from !== e.author) errors.push(`${tag} owes-review-not-owed: ${id}`);
+      }
+      const owed = owedBy(e.author);
+      if (owed.length && owed.some(id => !ack.includes(id))) {
+        warnings.push(`${tag} review-ack-mismatch: ${e.author} is named by ${owed.join(', ')} but acknowledged ${ack.filter(id => owed.includes(id)).join(', ') || 'none'}`);
+      }
+    }
+    if ((e.type === 'ratify' || e.type === 'object') && declared.size && 'measures' in (e.payload || {})) {
+      const owed = owedBy(e.author);
+      const ids = Array.isArray(e.payload.measures) ? e.payload.measures : [];
+      if (!owed.length) {
+        warnings.push(`${tag} verdict-measures-ignored: ${e.author} owes no measure; field ignored`);
+      } else if (!Array.isArray(e.payload.measures) || ids.length === 0) {
+        errors.push(`${tag} verdict-unscoped: ${e.author} owes ${owed.join(', ')}; a verdict from a named reviewer must list the measures it discharges`);
+      } else {
+        const mine = judged.get(e.author) || new Set();
+        let ok = true;
+        for (const id of ids) {
+          if (!declared.has(id)) { errors.push(`${tag} measure-unknown: ${id}`); ok = false; }
+          else if (!owed.includes(id)) { errors.push(`${tag} verdict-reviewer-mismatch: ${e.author} ${id}`); ok = false; }
+          else if (mine.has(id)) { errors.push(`${tag} verdict-duplicate: ${e.author} ${id}`); ok = false; }
+        }
+        // Whole-event semantics: a refused verdict credits nothing, so it judges nothing.
+        if (ok) { for (const id of ids) mine.add(id); judged.set(e.author, mine); }
+      }
+    }
     for (const f of ['event_id','ts','author','slug','type']) {
       if (e[f] == null) errors.push(`${tag} missing required field: ${f}`);
     }
@@ -62,6 +112,26 @@ export function validateEvents(events) {
           errors.push(`${tag} kickoff ratification_window_minutes must be a number between 1 and 1440 (got: ${JSON.stringify(r)})`);
         }
       }
+      if ('ratified_completion_measures' in (e.payload || {})) {
+        const ms = e.payload.ratified_completion_measures;
+        if (!Array.isArray(ms)) {
+          errors.push(`${tag} kickoff ratified_completion_measures must be an array (got: ${JSON.stringify(ms)})`);
+        } else {
+          ms.forEach((m, j) => {
+            const at = `${tag} ratified_completion_measures[${j}]`;
+            if (typeof m !== 'object' || m === null) {
+              errors.push(`${at} must be an object with id + requires_review_from`);
+              return;
+            }
+            if (typeof m.id !== 'string' || m.id === '')
+              errors.push(`${at} missing a non-empty string id`);
+            // The whole point of the field is naming WHO owes the review. A measure that
+            // names no reviewer cannot be discharged and cannot be reported as missing.
+            if (typeof m.requires_review_from !== 'string' || m.requires_review_from === '')
+              errors.push(`${at} missing a non-empty requires_review_from participant triplet`);
+          });
+        }
+      }
       if ('min_collab_plugin_version' in (e.payload || {})) {
         const v = e.payload.min_collab_plugin_version;
         if (typeof v !== 'string' || !SEMVER_RE.test(v)) {
@@ -82,7 +152,7 @@ export function main(argv) {
   if (!slug) { process.stderr.write('usage: collab-validate.mjs <slug>\n'); return 2; }
   const dir = findCollabDir(slug);
   if (!dir) { process.stderr.write(`no collab found: ${slug}\n`); return 2; }
-  const result = validateEvents(readEvents(dir));
+  const result = validateEvents(readEvents(dir), { collabDir: dir });
   if (result.warnings.length) process.stderr.write('Warnings:\n' + result.warnings.map(w => '  '+w).join('\n') + '\n');
   if (result.errors.length) { process.stderr.write('Errors:\n' + result.errors.map(e => '  '+e).join('\n') + '\n'); return 1; }
   process.stdout.write(`OK — ${readEvents(dir).length} events valid\n`);

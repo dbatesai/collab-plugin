@@ -1,11 +1,34 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectHarness, deriveTriplet, authorSlugFromTriplet, readLocalPluginVersion, readLocalPluginVersionInfo, checkMinVersion } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// The identity store is real and persistent, so it is pointed at a throwaway directory for
+// the whole file. Without this the suite would mint into the developer's own ~/.collab and
+// every assertion below would depend on whether it had ever been run before.
+const IDENTITY_ROOT = mkdtempSync(join(tmpdir(), 'collab-detect-harness-identity-'));
+const PREV_IDENTITY_ROOT = process.env.COLLAB_IDENTITY_ROOT;
+process.env.COLLAB_IDENTITY_ROOT = IDENTITY_ROOT;
+after(() => {
+  if (PREV_IDENTITY_ROOT === undefined) delete process.env.COLLAB_IDENTITY_ROOT;
+  else process.env.COLLAB_IDENTITY_ROOT = PREV_IDENTITY_ROOT;
+  rmSync(IDENTITY_ROOT, { recursive: true, force: true });
+});
+
+const { detectHarness, deriveTriplet, authorSlugFromTriplet, readLocalPluginVersion,
+  readLocalPluginVersionInfo, checkMinVersion } =
+  await import('../skills/collab/scripts/collab-event-helpers.mjs');
 
 // Integration coverage for the detectHarness re-export and triplet helpers.
 // Raw detectHarness priority/override behavior lives in test-transport.mjs; this
-// file proves the re-export wires through and that deriveTriplet honors the
-// v0.2 fallback chain (CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
+// file proves the re-export wires through and that a participant MINTED under each
+// harness composes its triplet from the v0.2 fallback chain
+// (CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
+//
+// Mint time is the only time the chain is consulted. What happens on every later call is
+// covered by test-collab-harness-identity.mjs: the triplet is read back from the store and
+// the environment is not asked again.
 
 // Save and restore env vars so tests don't leak
 function withEnv(env, fn) {
@@ -28,24 +51,37 @@ test('detectHarness re-export from helpers resolves to the transport.mjs impleme
   });
 });
 
-test('deriveTriplet: composes workspace@harness:machine with claude-code default', () => {
+test('deriveTriplet: a participant minted with no harness env composes @claude-code', () => {
   withEnv({ CODEX_PLUGIN_ROOT: null, GEMINI_PLUGIN_ROOT: null, COLLAB_HARNESS_OVERRIDE: null }, () => {
-    const t = deriveTriplet('core-framework');
-    assert.match(t, /^core-framework@claude-code:[\w-]+$/, `got: ${t}`);
+    const t = deriveTriplet('mint-default');
+    assert.match(t, /^mint-default@claude-code:[\w-]+$/, `got: ${t}`);
   });
 });
 
-test('deriveTriplet: harness reflects CODEX_PLUGIN_ROOT', () => {
+test('deriveTriplet: a participant minted under CODEX_PLUGIN_ROOT composes @codex', () => {
   withEnv({ CODEX_PLUGIN_ROOT: '/x', GEMINI_PLUGIN_ROOT: null, COLLAB_HARNESS_OVERRIDE: null }, () => {
-    const t = deriveTriplet('core-codex');
+    const t = deriveTriplet('mint-codex');
     assert.ok(t.includes('@codex:'), `got: ${t}`);
   });
 });
 
-test('deriveTriplet: harness reflects COLLAB_HARNESS_OVERRIDE when no CODEX/GEMINI set', () => {
+test('deriveTriplet: a participant minted under COLLAB_HARNESS_OVERRIDE composes that value', () => {
   withEnv({ CODEX_PLUGIN_ROOT: null, GEMINI_PLUGIN_ROOT: null, COLLAB_HARNESS_OVERRIDE: 'custom' }, () => {
-    const t = deriveTriplet('core-custom');
+    const t = deriveTriplet('mint-custom');
     assert.ok(t.includes('@custom:'), `got: ${t}`);
+  });
+});
+
+test('deriveTriplet: after minting, the harness chain is not consulted again', () => {
+  const minted = withEnv({ CODEX_PLUGIN_ROOT: '/x', GEMINI_PLUGIN_ROOT: null, COLLAB_HARNESS_OVERRIDE: null },
+    () => deriveTriplet('mint-then-move'));
+  assert.ok(minted.includes('@codex:'), `fixture precondition, got: ${minted}`);
+  // Guard: the chain really does report something else now, so the equality below is a
+  // statement about persistence and not about an environment that never moved.
+  withEnv({ CODEX_PLUGIN_ROOT: null, GEMINI_PLUGIN_ROOT: null, COLLAB_HARNESS_OVERRIDE: null }, () => {
+    assert.equal(detectHarness(), 'claude-code');
+    assert.equal(deriveTriplet('mint-then-move'), minted,
+      'the triplet was recomposed from the current environment instead of read from the store');
   });
 });
 

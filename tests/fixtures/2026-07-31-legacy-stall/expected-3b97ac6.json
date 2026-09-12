@@ -1,0 +1,22 @@
+{
+  "computed_at": "3b97ac6",
+  "events": 19,
+  "close_outcome": "aborted-stall",
+  "close_ts": "2026-07-31T23:51:17.923Z",
+  "close_author": "core-framework@claude-code:host",
+  "last_event_before_close": "2026-07-31T23:05:24.053Z",
+  "tick_ms": 300000,
+  "net_at_close": "stall",
+  "route_at_close": "safety-net:stall",
+  "unmet": [],
+  "required": [],
+  "ratification": null,
+  "obligations_due_at_close": [],
+  "obligations_invalid_at_close": [
+    {
+      "event_id": "evt-202607312258-core-codex-f2cc9944-1512-4279-9de0-20a88d15a3c8",
+      "participant": "core-codex@claude-code:host",
+      "reason": "waiting with a deadline but no valid on_timeout (got undefined); expected one of proceed-alone, reassign, degrade-and-continue, close-degraded"
+    }
+  ]
+}

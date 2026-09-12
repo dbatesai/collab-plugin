@@ -4,6 +4,43 @@ All notable changes to collab-plugin are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versioning: [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+## [1.2.0] — 2026-09-12
+
+### Behavior changes for existing callers
+
+- A kickoff that wants other participants must declare at least one completion measure (`--measure "<id>|<description>|<triplet>"`, repeatable; `--required-review <triplet>` generates one). The writer refuses `completion-measures-required`, `completion-measure-placeholder`, and `completion-measure-invalid`. Solo kickoffs need none. Existing ledgers read unchanged: absent measures are the legacy shape and are never refused at read.
+- A `ratify` or `object` from a reviewer the kickoff names must carry `measures: [<ids>]`. The writer refuses a bare one (`verdict-unscoped`) and a duplicate on a measure that reviewer already judged (`verdict-duplicate`); a byte-identical retry stays idempotent. A bare verdict already on a ledger is read the way 1.1.0 read it and labeled `scope: 'legacy'`.
+- Chases are reminders and no longer gate the fallback. A turn without a strict-ISO `next_update_by` is due at its timestamp plus one tick cadence, and an absent `on_timeout` is `proceed-alone`; both are computed at read and never written back. The first tick at or after a deadline executes its fallback, by whichever participant ticks, once per deadline. A turn with no deadline is now chased one cadence plus grace after it lands.
+- Silence no longer ratifies when the silent peer's review is itself a ratified completion measure. It still ratifies for an ordinary peer.
+- A kickoff with no transport token returns `transport-required` and asks, instead of resolving to `github:files`.
+- A file under `events/` whose name is not its event id is a hard stop at every write and publish boundary (`event-filename-violation`): the tick refuses before quarantine or routing, `appendEvent` throws, `render()` and `deliverChannel()` refuse before output, the v1 quarantine refuses and otherwise acts only on the file it read. `status` and `list` still read the channel, skipping the file, so a person can rename it. The cost is availability: a stray file stops valid work on that channel until it is fixed.
+- Cursor files are no longer partitioned by harness; a cursor written under the old layout is read forward on first use.
+
+### Added
+
+- **One close outcome, both routes.** The proposer's close and the stall net share one calculation: any objection → `failed-safely`; any ratified measure → `complete-to-authority-boundary`; nothing judged → `failed-safely`; `converged` only from the proposer route with every measure and the synthesis ratified. The close carries `ratified_measures`, `objected_measures`, `unmet_ratified_measures`, `missing_reviews_from`, `ratified_by`, and the route. `aborted-stall` remains the word for a ledger with no measures. `detectRoute` returns `terminal:authority-boundary` when the proposer ticks with an unmet required review.
+- **`contract-invalid`.** A declaration this writer would refuse (hand edit, older writer) is refused at the tick once a second participant has joined: `{ action: 'contract-invalid', errors, repair }`, nothing written.
+- **Delivery on git transports, bounded by ownership evidence.** Every publishing route delivers only what this participant's plugin wrote: a new event file whose author is the participant, or bytes the plugin recorded, path-bound, by blob hash when it wrote them (renders, `KICKOFF.md`; manifest under `~/.collab/delivery/`, written atomically, unreadable reads as empty). Renders are derived only from publishable events — the participant's own new events, published events whose bytes as parsed equal the upstream blob, and events published as an upstream `events.jsonl` line; a local file that contradicts a published representation is a conflict, preserved and reported in `render_conflicts`, and a render never replaces an existing file it cannot account for (`render_blocked`). The rule holds in every state: a committed draft inside the channel or a committed hand edit to an event blocks the push and is preserved. The commit is `--only` the owned paths; foreign new files are reported and never staged; a tracked file modified into something unowned, or deleted, blocks delivery. Records an interrupted tick left behind reach the remote on the next tick, once; the push is verified against the upstream ref. Results carry `delivery` (`published_paths`, `foreign_paths`, `blocked`, `pushed`, `verified`).
+- **Requests you can see.** A turn whose `waiting_on` names you is an open request on you: in the tick result (`open_requests`), in the `STATUS.md` Waiting table, and in `collab-status`. Lifecycle `requested` → `accepted` → `delivered` | `declined` | `lapsed`, moved only by a referencing turn with that signal, a credited scoped verdict, or the requester's timeout fallback. A request may name the measures it is about (`measures` on the turn). Two participants each waiting on the other is a wait cycle, reported in `wait_cycles` and recorded once per pair.
+- **A participant is minted once.** `participant_id` (`pcp-<uuid>`) is minted at first join, persisted at `~/.collab/identity/<workspace-id>.json`, and carried on every event; the display triplet is frozen at mint. `harness` is advisory beside it and may drift without renaming the participant. When a channel's events are in hand, the identity that channel already admitted outranks anything this machine would mint.
+- `STATUS.md` gains a Measures table and prints the close receipt. `collab-list` and `collab-validate` have doors in `SKILL.md`; a prose test pins door coverage.
+- Validator rules: `measure-unknown`, `verdict-reviewer-mismatch`, `verdict-duplicate`, `owes-review-not-owed`; warnings `review-ack-mismatch`, `verdict-measures-ignored`; error on `event-filename-violation`.
+
+### Fixed
+
+- `git pull` passes `--autostash` explicitly. It ran a plain `git pull --rebase`, which refuses on a dirty working tree unless the user's git config enables autostash; five delivery cases passed on one machine and failed in CI. The delivery tests now run under an empty global git config.
+- A repo-claim contender crashed on an uncaught `ENOENT` when the holder released between the existence check and the stat.
+- Codex and Antigravity installs resolved a stale May mirror (`plugins/collab/`) while Claude Code installed the repo root; the mirror is gone and the Codex marketplace points at the root. CI checks the path.
+- The validator did not recognize `reconciled`, `quarantined`, and `timeout-action`, so a channel that had repaired itself reported its own repair as a schema error.
+- Two pending tests failed on their import path rather than on their defect; one test imported the helpers through a developer-machine absolute path.
+- `validateMeasures` moved from `collab-kickoff.mjs` into `collab-event-helpers.mjs` (re-exported).
+
+### Known gaps
+
+Stale-context detection between read and append (the reread convention is documented with its race); participant identity across machines; transport defaults; never-closed sessions that nobody ticks; wall-clock extension; process-kill and simultaneous-writer certification of the delivery manifest. Amending the measure list after kickoff is designed and not built.
+
 ## [1.1.0] — 2026-07-30
 
 Communication-protocol hardening. Nineteen defects were found by three agents trying to hold a real conversation on this protocol; eighteen are closed here. None of them threw an error — every one reported success while doing the wrong thing, which is why the whole release is organised around making failure loud.
@@ -196,5 +233,5 @@ Scaffold-only auto-tag from CI. See [0.1.1] for the actual v0.1 release content.
 - SKILL.md placeholder (functional manual landed in 0.1.1).
 - References: `capabilities.md`, `igm-derivation.md`.
 - CI: syntax check, manifest validation, harness lockstep, SKILL.md frontmatter, unit tests (52 at scaffold).
-- `collab-route.mjs` deterministic message routing (DC-77).
+- `collab-route.mjs` deterministic message routing.
 - `collab-tick.mjs` refactor: `tickDeterministic()` handles deterministic paths only; LLM-decision routes exit with `{action: 'agent-decision-needed', route, ...}`.

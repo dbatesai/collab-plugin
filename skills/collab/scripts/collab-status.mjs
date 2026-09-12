@@ -4,7 +4,7 @@
  */
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { findCollabDir, findCollabAcrossTransports, readEvents, getJoinedAgents, isClosed, findActiveProposeClose, checkSafetyNets } from './collab-event-helpers.mjs';
+import { findCollabDir, findCollabAcrossTransports, readEvents, getJoinedAgents, isClosed, findActiveProposeClose, checkSafetyNets, openRequests } from './collab-event-helpers.mjs';
 import { resolveTransportPaths } from './transport.mjs';
 
 export function printStatus(events, slug) {
@@ -16,7 +16,8 @@ export function printStatus(events, slug) {
 
   const state = closeEvt ? `CLOSED (${closeEvt.payload.outcome})` : propose ? 'PROPOSE-CLOSE PENDING' : 'ACTIVE';
   console.log(`\n── collab: ${slug} ──────────────────────────────`);
-  console.log(`State: ${state}  |  Events: ${events.length}  |  Participants: ${joined.length}`);
+  const waiting = joined.reduce((n, a) => n + openRequests(events, a).length, 0);
+  console.log(`State: ${state}  |  Events: ${events.length}  |  Participants: ${joined.length}  |  Open requests: ${waiting}`);
   if (net) console.log(`Safety net triggered: ${net}`);
   if (kickoff?.payload?.igm) {
     const { intention, goal, measure } = kickoff.payload.igm;

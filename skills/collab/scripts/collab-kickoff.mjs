@@ -6,19 +6,34 @@
  * CLI: node collab-kickoff.mjs "<message>" --workspace-id <id> [--dry-run]
  *      [--transport <id>] [--tick-interval-minutes <n>] [--pin <6-digits>]
  *      [--ratification-window-minutes <n>] [--min-version <semver>]
+ *      [--required-review <participant-triplet>]   (repeatable)
  */
-import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   deriveSlug, appendEvent, renderEventsJsonl,
-  deriveTriplet, gitPullRebase, gitCommitPush, generatePin,
+  resolveIdentity, gitPullRebase, deliverChannel, recordOwnedArtifact, generatePin,
   assertSlugUnique, generateEventId, authorSlugFromTriplet,
+  PLACEHOLDER_MEASURE_RE, validateMeasures,
 } from './collab-event-helpers.mjs';
 import {
   parseTransport, isGitTransport, resolveTransportPaths,
   defaultTickIntervalMinutes, defaultRatificationWindowMinutes, preflightTransport,
 } from './transport.mjs';
+
+// The measure validator lives with the other ledger semantics; re-exported so the CLI's
+// callers keep one import.
+export { PLACEHOLDER_MEASURE_RE, validateMeasures };
+
+/** `--measure "<id>|<description>|<participant-triplet>"` → measure object; throws on malformed input. */
+export function parseMeasureFlag(value) {
+  const parts = String(value ?? '').split('|').map(s => s.trim());
+  if (parts.length !== 3 || parts.some(p => !p)) {
+    throw new Error('--measure needs "<id>|<description>|<participant-triplet>" with all three parts non-empty');
+  }
+  return { id: parts[0], description: parts[1], requires_review_from: parts[2] };
+}
 
 export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes, pin, opts = {}) {
   const payload = { message, igm, capabilities_wanted: capabilitiesWanted, wall_clock_hours: wallClockHours };
@@ -27,6 +42,21 @@ export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockH
   if (typeof opts.transport === 'string') payload.transport = opts.transport;
   if (typeof opts.ratificationWindowMinutes === 'number') payload.ratification_window_minutes = opts.ratificationWindowMinutes;
   if (typeof opts.minCollabPluginVersion === 'string') payload.min_collab_plugin_version = opts.minCollabPluginVersion;
+
+  const generated = (Array.isArray(opts.requiredReviews) ? opts.requiredReviews : []).map(t => ({
+    id: `independent-review-${authorSlugFromTriplet(t)}`,
+    description: `independent review by ${t}`,
+    requires_review_from: t,
+  }));
+  const measures = [...generated, ...(Array.isArray(opts.measures) ? opts.measures : [])];
+
+  // Writer gate: a non-solo session (capabilities wanted) must declare its contract.
+  if (capabilitiesWanted.length && measures.length === 0) {
+    throw new Error('completion-measures-required: a kickoff that wants other participants must declare at least one measure (--measure or --required-review)');
+  }
+  const errors = validateMeasures(measures);
+  if (errors.length) throw new Error(errors.join('; '));
+  if (measures.length) payload.ratified_completion_measures = measures;
   return payload;
 }
 
@@ -63,6 +93,8 @@ export async function kickoff(message, options = {}) {
     transport = 'github:files',
     ratificationWindowMinutes,
     minCollabPluginVersion = '0.2.0',
+    requiredReviews = [],
+    measures = [],
   } = options;
 
   if (!parseTransport(transport)) throw new Error(`invalid transport: ${transport}`);
@@ -83,7 +115,10 @@ export async function kickoff(message, options = {}) {
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
 
   const igm = deriveIGM(message);
-  const triplet = deriveTriplet(workspaceId);
+  // Mints the participant on first use and reads the persisted record after. `harness` is
+  // read fresh and travels beside the identity on each event, never inside it.
+  const identity = resolveIdentity(workspaceId);
+  const triplet = identity.triplet;
   const nowTs = new Date().toISOString();
   const collabPin = pin || generatePin();
   const tickMin = typeof tickIntervalMinutes === 'number'
@@ -95,7 +130,9 @@ export async function kickoff(message, options = {}) {
 
   const { collabDir, turnsDir } = resolveTransportPaths(transport, dirName);
   mkdirSync(turnsDir, { recursive: true });
-  writeFileSync(join(collabDir, 'KICKOFF.md'), buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet));
+  const kickoffMd = buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet);
+  writeFileSync(join(collabDir, 'KICKOFF.md'), kickoffMd);
+  recordOwnedArtifact(collabDir, triplet, 'KICKOFF.md', kickoffMd);
 
   const authorSlug = authorSlugFromTriplet(triplet);
   const kickoffEvtId = generateEventId(nowTs, authorSlug);
@@ -103,6 +140,8 @@ export async function kickoff(message, options = {}) {
     event_id: kickoffEvtId,
     ts: nowTs,
     author: triplet,
+    participant_id: identity.participant_id,
+    harness: identity.harness,
     slug,
     type: 'kickoff',
     references: [],
@@ -110,6 +149,8 @@ export async function kickoff(message, options = {}) {
       transport,
       ratificationWindowMinutes: ratMin,
       minCollabPluginVersion,
+      requiredReviews,
+      measures,
     }),
   };
   appendEvent(collabDir, kickoffEvt);
@@ -121,6 +162,8 @@ export async function kickoff(message, options = {}) {
     event_id: generateEventId(joinTs, authorSlug),
     ts: joinTs,
     author: triplet,
+    participant_id: identity.participant_id,
+    harness: identity.harness,
     slug,
     type: 'join',
     references: [kickoffEvtId],
@@ -129,13 +172,15 @@ export async function kickoff(message, options = {}) {
   appendEvent(collabDir, joinEvt);
 
   renderEventsJsonl(collabDir);
+  recordOwnedArtifact(collabDir, triplet, 'events.jsonl', readFileSync(join(collabDir, 'events.jsonl')));
 
   if (!dryRun && isGitTransport(transport)) {
-    gitCommitPush(collabDir, transport, `[${triplet}] kickoff: ${slug} ${kickoffEvtId}`);
+    deliverChannel(collabDir, transport, triplet, `[${triplet}] kickoff: ${slug} ${kickoffEvtId}`);
   }
 
   return {
-    slug, triplet, dir: collabDir, transport,
+    slug, triplet, participantId: identity.participant_id, harness: identity.harness,
+    dir: collabDir, transport,
     tickIntervalMinutes: tickMin, ratificationWindowMinutes: ratMin,
     kickoffEvt, joinEvt, pin: collabPin,
   };
@@ -144,8 +189,14 @@ export async function kickoff(message, options = {}) {
 export function main(argv) {
   let message = null, workspaceId = null, dryRun = false;
   let tickIntervalMinutes, pin, transport, ratificationWindowMinutes, minCollabPluginVersion;
+  const requiredReviews = [];
+  const measures = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
+    else if (argv[i] === '--measure') {
+      try { measures.push(parseMeasureFlag(argv[++i])); }
+      catch (e) { process.stderr.write(`${e.message}\n`); return 2; }
+    }
     else if (argv[i] === '--dry-run') dryRun = true;
     else if (argv[i] === '--transport') transport = argv[++i];
     else if (argv[i] === '--tick-interval-minutes') {
@@ -163,6 +214,14 @@ export function main(argv) {
         return 2;
       }
       ratificationWindowMinutes = n;
+    }
+    else if (argv[i] === '--required-review') {
+      const t = argv[++i];
+      if (!t || t.startsWith('--')) {
+        process.stderr.write('--required-review needs a participant triplet like core-gemini@antigravity:host\n');
+        return 2;
+      }
+      requiredReviews.push(t);
     }
     else if (argv[i] === '--min-version') {
       minCollabPluginVersion = argv[++i];
@@ -186,7 +245,7 @@ export function main(argv) {
   }
   kickoff(message, {
     workspaceId, dryRun, tickIntervalMinutes, pin,
-    transport, ratificationWindowMinutes, minCollabPluginVersion,
+    transport, ratificationWindowMinutes, minCollabPluginVersion, requiredReviews, measures,
   })
     .then(r => {
       process.stdout.write(

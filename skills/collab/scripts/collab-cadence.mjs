@@ -10,13 +10,19 @@
  * This module reads/writes cursor state to a per-participant file.
  *
  * Cursor file path:
- *   ~/.collab/cursors/<machine-slug>/<harness>/<participant-encoded-triplet>-<slug>.json
+ *   ~/.collab/cursors/<machine-slug>/<transport>/<participant-key>-<slug>.json
+ *
+ * The harness is deliberately absent from that path. It used to be a directory segment AND
+ * a substring of the filename, so an agent whose harness reading changed came back to a
+ * cursor file that did not exist and silently re-read from zero. The harness is advisory;
+ * a read position is not.
  */
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { parseTriplet, identityKeyFromTriplet } from './collab-identity.mjs';
 
 export const FAST_POLL_SECONDS = 30;
 export const FAST_POLL_WINDOW_MINUTES = 5;
@@ -50,10 +56,15 @@ export function encodeTransport(transport) {
  * Derive the cursor file path for a participant.
  *
  * Cursor identity MUST include transport + repo/root (v1.0 plan §3.1, HC blocker #1):
- * the same triplet+slug can legitimately exist on two transports (localhost AND
+ * the same participant+slug can legitimately exist on two transports (localhost AND
  * github:files), and they must not collide on one cursor file.
  *
- * Path: ~/.collab/cursors/<machine>/<harness>/<transport>/<encoded-triplet>-<slug>.json
+ * Cursor identity must NOT include the harness. The harness is advisory and free to move;
+ * a read position that moves with it is lost, and losing it is silent — the reader just
+ * starts over from an empty cursor. So the participant key is the workspace and machine
+ * components only.
+ *
+ * Path: ~/.collab/cursors/<machine>/<transport>/<workspace>--<machine>-<slug>.json
  *
  * @param {string} triplet — participant triplet (e.g., 'core-framework@claude-code:Jennifer-Aniston')
  * @param {string} slug — collab slug
@@ -65,13 +76,39 @@ export function cursorFilePath(triplet, slug, opts = {}) {
   const o = (typeof opts === 'string') ? { machineSlug: opts } : (opts || {});
   const machine = o.machineSlug || deriveMachineSlug();
   const transport = encodeTransport(o.transport || 'unknown-transport');
-  // Extract harness from triplet: 'workspace@harness:machine' → 'harness'
-  const harnessMatch = triplet.match(/@([^:]+):/);
-  const harness = harnessMatch ? harnessMatch[1] : 'unknown-harness';
-  // Encode triplet for filename: replace @ and : with -
-  const encodedTriplet = triplet.replace(/@/g, '-').replace(/:/g, '-');
-  const filename = `${encodedTriplet}-${slug}.json`;
-  return join(homedir(), '.collab', 'cursors', machine, harness, transport, filename);
+  const filename = `${identityKeyFromTriplet(triplet)}-${slug}.json`;
+  return join(homedir(), '.collab', 'cursors', machine, transport, filename);
+}
+
+/**
+ * Cursor files written by an install that still partitioned by harness.
+ *
+ * Layout then: <cursors>/<machine>/<harness>/<transport>/<workspace>-<harness>-<machine>-<slug>.json
+ * Layout now:  <cursors>/<machine>/<transport>/<workspace>--<machine>-<slug>.json
+ *
+ * Both segments are recovered from `cursorPath` itself, so this works no matter how the
+ * caller built it. A harness directory only counts as one if it actually contains the
+ * transport directory underneath, which is what keeps the new layout from matching itself.
+ */
+export function legacyCursorFilePaths(cursorPath, triplet, slug) {
+  const transportSeg = basename(dirname(cursorPath));
+  const machineDir = dirname(dirname(cursorPath));
+  const p = parseTriplet(triplet);
+  if (!p || !existsSync(machineDir)) return [];
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameRe = new RegExp(`^${esc(p.workspaceId)}-.+-${esc(p.machine)}-${esc(slug)}\\.json$`);
+  const found = [];
+  let entries;
+  try { entries = readdirSync(machineDir, { withFileTypes: true }); } catch { return []; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const dir = join(machineDir, e.name, transportSeg);
+    if (!existsSync(dir)) continue;
+    let files;
+    try { files = readdirSync(dir); } catch { continue; }
+    for (const f of files) if (nameRe.test(f)) found.push(join(dir, f));
+  }
+  return found.sort();
 }
 
 /**
@@ -88,7 +125,9 @@ export function readCursorState(cursorPath, triplet, slug, transport) {
     transport,
     participant_triplet: triplet,
     machine: deriveMachineSlug(),
-    harness: (triplet.match(/@([^:]+):/) || [])[1] || 'unknown',
+    // Advisory only. Recorded so a human reading the cursor knows where it was last
+    // written from; nothing routes on it and nothing is partitioned by it.
+    harness: parseTriplet(triplet)?.harness || 'unknown',
     last_seen_event_id: null,
     last_posted_at: null,
     fast_poll_window_expires_at: null,
@@ -97,9 +136,15 @@ export function readCursorState(cursorPath, triplet, slug, transport) {
     last_committed_next_update_by: null,
     commitment_drift_state: 'unknown',
   };
-  if (!existsSync(cursorPath)) return defaults;
+  // Read forward from a harness-partitioned cursor written by an older install, rather than
+  // silently restarting from an empty read position.
+  let readFrom = cursorPath;
+  if (!existsSync(readFrom)) {
+    readFrom = legacyCursorFilePaths(cursorPath, triplet, slug)[0];
+    if (!readFrom) return defaults;
+  }
   try {
-    const raw = JSON.parse(readFileSync(cursorPath, 'utf8'));
+    const raw = JSON.parse(readFileSync(readFrom, 'utf8'));
     return { ...defaults, ...raw };
   } catch {
     return defaults;

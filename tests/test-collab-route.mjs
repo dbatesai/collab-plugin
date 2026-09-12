@@ -23,7 +23,9 @@ const STATE_OPEN = stateWith({ existsActive: new Set(['memory-arch']) });
 const STATE_JOINED = stateWith({ existsActive: new Set(['memory-arch']), joined: new Set(['memory-arch']) });
 
 test('no slug, describes work → kickoff', () => {
-  const r = detectAction('do a memory architecture review', STATE_EMPTY, null);
+  // Transport is explicit because a kickoff no longer accepts a guess (D8). What is
+  // under test here is "this message describes new work", not transport resolution.
+  const r = detectAction('do a memory architecture review', STATE_EMPTY, 'github:files');
   assert.equal(r.route, 'kickoff');
 });
 
@@ -62,7 +64,7 @@ test('cancel slug X → abort', () => {
 });
 
 test('slug ambiguous (not in state) and message describes work → kickoff', () => {
-  const r = detectAction('do a brand new task', STATE_OPEN, null);
+  const r = detectAction('do a brand new task', STATE_OPEN, 'github:files');
   assert.equal(r.route, 'kickoff');
 });
 
@@ -145,11 +147,16 @@ test('status routes correctly when paired with explicit transport', () => {
   assert.equal(r.transport, 'github:files');
 });
 
-test('detectAction with no explicit transport defaults to github:files', () => {
+// Was: "detectAction with no explicit transport defaults to github:files". That default
+// is exactly what D8 removed, so the test that pinned it is now the wrong shape rather
+// than a failing test. The refusal it became is covered in depth by
+// test-collab-transport-required.mjs; this keeps the assertion here too, because this
+// file is where someone reintroducing a default would look first.
+test('detectAction with no explicit transport refuses to start a collab', () => {
   const state = { byTransport: { 'github:files': { existsActive: new Set(), existsClosed: new Set(), joined: new Set() } }, pinIndex: new Map() };
   const r = detectAction('discuss the architecture', state, null);
-  assert.equal(r.route, 'kickoff');
-  assert.equal(r.transport, 'github:files');
+  assert.equal(r.route, 'transport-required');
+  assert.equal(r.transport, null);
 });
 
 test('detectAction routes join when slug exists in the named transport', () => {

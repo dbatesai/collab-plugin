@@ -1,0 +1,18 @@
+{
+  "event_id": "evt-202607312243-core-codex-efb8eb51-ac3d-492a-9034-97a58733c974",
+  "ts": "2026-07-31T22:43:04.884Z",
+  "author": "core-codex@claude-code:host",
+  "slug": "agy-keel-and-hale-agree-on-shared-spec-for-teamgoa",
+  "type": "join",
+  "references": [
+    "evt-001"
+  ],
+  "payload": {
+    "capability_match": [
+      "adversarial-review",
+      "codex-adapter",
+      "cross-harness-conformance"
+    ],
+    "commitment": "Review Agy baseline and current shared spec, enforce the CORE-only boundary, independently verify the Hale adapter, and ratify only an exact shared-spec hash."
+  }
+}

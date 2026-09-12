@@ -5,3 +5,6 @@ node_modules/
 .env.local
 coverage/
 .nyc_output/
+
+# per-release premise audit (working artifact, never shipped)
+.release-premise-audit.md

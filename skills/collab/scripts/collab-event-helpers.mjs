@@ -7,10 +7,10 @@
  */
 import {
   readFileSync, writeFileSync,
-  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync,
+  existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync, renameSync,
 } from 'node:fs';
-import { randomBytes, randomUUID } from 'node:crypto';
-import { join, resolve, dirname } from 'node:path';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { join, resolve, dirname, relative, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +22,19 @@ import {
   parseTransport, collabsRootForTransport,
 } from './transport.mjs';
 export { detectHarness };
+
+// Participant identity is minted once and persisted (collab-identity.mjs). Re-exported here
+// because every emit path already imports its identity from this module.
+import {
+  resolveIdentity, findAdmittedIdentity, parseTriplet, identityKeyFromTriplet, deriveMachine,
+} from './collab-identity.mjs';
+export {
+  resolveIdentity, findAdmittedIdentity, parseTriplet, identityKeyFromTriplet, deriveMachine,
+};
+export {
+  composeTriplet, mintParticipantId, identityRoot, identityRecordPath,
+  readIdentityRecord, writeIdentityRecord,
+} from './collab-identity.mjs';
 
 export const FILES_REPO = resolve(homedir(), 'Documents/Projects/files');
 export const COLLABS_DIR = join(FILES_REPO, 'collabs');
@@ -105,13 +118,18 @@ export function generateEventId(tsIso, authorSlug) {
 
 // --- Triplet ---
 
+// The participant's display name for a workspace. Minted once, then read from the identity
+// store on every later call — it does NOT re-sniff the environment. Losing the harness env
+// var now degrades the advisory `harness` field on new events and leaves this string alone.
 export function deriveTriplet(workspaceId) {
-  // `hostname -s` is unsupported on Windows; fall back to no-args form which
-  // works cross-platform and returns the short hostname on all three OSes.
-  let r = spawnSync('hostname', ['-s'], { encoding: 'utf8' });
-  if (r.error || r.status !== 0) r = spawnSync('hostname', [], { encoding: 'utf8' });
-  const machine = (r.stdout || '').trim().split('.')[0] || 'unknown';
-  return `${workspaceId}@${detectHarness()}:${machine}`;
+  return resolveIdentity(workspaceId).triplet;
+}
+
+// The identity to author events under inside one specific channel. Same as deriveTriplet
+// except the channel's own ledger gets the first word, which is what keeps a pre-identity
+// channel — join events with no participant_id — resolving after an upgrade.
+export function channelIdentity(events, workspaceId) {
+  return resolveIdentity(workspaceId, { events });
 }
 
 export function authorSlugFromTriplet(triplet) {
@@ -197,12 +215,23 @@ export function createCollabDir(slug) {
 
 // --- Event I/O ---
 
+/**
+ * Where an event came from, bound to the bytes that were parsed: `{ path, hash }` with the
+ * channel-relative path and the git blob id of the exact buffer `JSON.parse` saw. Set by
+ * `readEvents` under a symbol so it never serialises; read by the render's input filter so
+ * the evidence is of the bytes in hand, never of a file re-read by an id-derived path.
+ */
+export const EVENT_SOURCE = Symbol('collab.event-source');
+
 // Read all events from <collabDir>/events/*.json. Sort by ts, then event_id as tie-breaker.
+// A file is an event only if its name is its event id: `events/<event_id>.json` is the one
+// shape this plugin writes, so any other name is not a second copy of that event, it is a
+// foreign file that borrowed an id. It is left where it is and never read as the event.
 // Backward compat: if events/ does not exist but events.jsonl does, read JSONL directly (v0.1.x).
 export function readEvents(collabDir) {
   const eventsDir = join(collabDir, 'events');
   if (existsSync(eventsDir)) {
-    const seen = new Map(); // event_id → event (first wins on dup)
+    const seen = new Map(); // event_id → event
     for (const name of readdirSync(eventsDir)) {
       // Skip non-JSON and dot-prefixed artifacts: .tmp- (in-flight writes),
       // .quarantined- (v1 invalid events), .superseded- (quarantine originals).
@@ -210,12 +239,17 @@ export function readEvents(collabDir) {
       if (!name.endsWith('.json') || name.startsWith('.')) continue;
       const path = join(eventsDir, name);
       try {
-        const content = readFileSync(path, 'utf8');
-        const event = JSON.parse(content);
+        const bytes = readFileSync(path);
+        const event = JSON.parse(bytes.toString('utf8'));
         if (!event || typeof event !== 'object' || !event.event_id || !event.ts) {
           process.stderr.write(`(warn) skipping malformed event file ${path}\n`);
           continue;
         }
+        if (name !== `${event.event_id}.json`) {
+          process.stderr.write(`(warn) skipping ${path}: file name is not its event id (${event.event_id}); left in place, not read as an event\n`);
+          continue;
+        }
+        event[EVENT_SOURCE] = { path: join('events', name), hash: gitBlobHash(bytes) };
         if (!seen.has(event.event_id)) seen.set(event.event_id, event);
       } catch (e) {
         process.stderr.write(`(warn) skipping unreadable event file ${path}: ${e.message}\n`);
@@ -231,8 +265,11 @@ export function readEvents(collabDir) {
   const out = [];
   for (const line of readFileSync(jsonlPath, 'utf8').split('\n')) {
     if (!line.trim()) continue;
-    try { out.push(JSON.parse(line)); }
-    catch (e) { process.stderr.write(`(warn) skipping malformed JSONL line in ${jsonlPath}: ${e.message}\n`); }
+    try {
+      const event = JSON.parse(line);
+      event[EVENT_SOURCE] = { path: 'events.jsonl', hash: null };
+      out.push(event);
+    } catch (e) { process.stderr.write(`(warn) skipping malformed JSONL line in ${jsonlPath}: ${e.message}\n`); }
   }
   return out;
 }
@@ -243,7 +280,75 @@ export function readEvents(collabDir) {
 // to write. The first append would otherwise strand all prior JSONL events behind
 // the new events/ directory (which readEvents prefers when present). Surfacing
 // the conflict loudly is the right move per spec §9.6 (read-only compat).
+// A measure whose description is still the kickoff's inferred placeholder has no stated
+// completion condition and must not pass the declaration gate.
+export const PLACEHOLDER_MEASURE_RE = /^\(measure inferred/i;
+
+/**
+ * Validate a declared measure list. Returns error strings in the shared vocabulary
+ * (`completion-measure-placeholder: <id>`, `completion-measure-invalid: <id>`); empty when valid.
+ */
+export function validateMeasures(measures) {
+  const errors = [];
+  const seen = new Set();
+  for (const m of measures) {
+    const id = typeof m?.id === 'string' && m.id.trim() ? m.id : null;
+    const tag = id ?? '(missing id)';
+    if (!id || typeof m.requires_review_from !== 'string' || !m.requires_review_from.trim()
+        || typeof m.description !== 'string' || !m.description.trim()) {
+      errors.push(`completion-measure-invalid: ${tag}`);
+      continue;
+    }
+    if (PLACEHOLDER_MEASURE_RE.test(m.description.trim())) errors.push(`completion-measure-placeholder: ${id}`);
+    if (seen.has(id)) errors.push(`completion-measure-invalid: ${id}`);
+    seen.add(id);
+  }
+  return errors;
+}
+
+/**
+ * The writer gate: what this plugin refuses to emit. A non-solo kickoff must declare valid
+ * measures; a verdict from a reviewer the ledger names must say which measures it judges.
+ * Returns an error string, or null. Reads the ledger only for the two verdict types.
+ */
+function writerGateError(collabDir, event) {
+  if (event.type === 'kickoff') {
+    const p = event.payload || {};
+    const nonSolo = Array.isArray(p.capabilities_wanted) && p.capabilities_wanted.length > 0;
+    const ms = p.ratified_completion_measures;
+    if (nonSolo && (!Array.isArray(ms) || ms.length === 0)) {
+      return 'completion-measures-required: a kickoff that wants other participants must declare at least one measure';
+    }
+    if (Array.isArray(ms)) { const errs = validateMeasures(ms); if (errs.length) return errs.join('; '); }
+    return null;
+  }
+  if (event.type !== 'ratify' && event.type !== 'object') return null;
+  const ledger = readEvents(collabDir);
+  const owed = declaredMeasures(ledger).filter(m => m.requires_review_from === event.author).map(m => m.id);
+  if (owed.length === 0) return null;
+  const ids = event.payload?.measures;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return `verdict-unscoped: ${event.author} owes ${owed.join(', ')}; a verdict from a named reviewer must list the measures it discharges`;
+  }
+  // A measure this reviewer has already judged on the ledger as read now. The judgment that
+  // is this very event (same id — a retry after an interrupted publish) is not a duplicate;
+  // the byte-identical check below decides that. Two writers that both read before either
+  // wrote can still both land; the reader credits the first only.
+  const verdicts = measureVerdicts(ledger);
+  for (const id of ids) {
+    const v = verdicts.get(id);
+    if (v && [...v.ratified, ...v.objected].some(c => c.by === event.author && c.event_id !== event.event_id)) {
+      return `verdict-duplicate: ${event.author} ${id}`;
+    }
+  }
+  return null;
+}
+
 export function appendEvent(collabDir, event) {
+  const violations = eventFilenameViolations(collabDir);
+  if (violations.length) throw new Error(`event-filename-violation: ${violations.join(', ')} — nothing is written to this channel while a file under events/ is not named for the event it contains`);
+  const gate = writerGateError(collabDir, event);
+  if (gate) throw new Error(gate);
   const eventsDir = join(collabDir, 'events');
   const jsonlPath = join(collabDir, 'events.jsonl');
   if (!existsSync(eventsDir) && existsSync(jsonlPath)) {
@@ -417,7 +522,7 @@ export function reconcileForeignSurface(collabDir, author) {
 //
 // Refuses when events.jsonl holds events canonical does not, since rendering would destroy
 // them. The guard is at the writer boundary so every caller inherits it; reconcile first.
-export function renderEventsJsonl(collabDir) {
+export function renderEventsJsonl(collabDir, { include, events: given } = {}) {
   const { foreign } = foreignSurfaceEvents(collabDir);
   if (foreign.length > 0) {
     const err = new Error(
@@ -429,9 +534,13 @@ export function renderEventsJsonl(collabDir) {
     err.foreignIds = foreign.map(e => e.event_id);
     throw err;
   }
-  const events = readEvents(collabDir);
+  // `events` is the caller's already-resolved input set (published representations in place
+  // of conflicting local ones); `include` narrows a fresh read. A derived file must not carry
+  // what its raw inputs may not, and must not lose what is already published.
+  const events = given ?? readEvents(collabDir).filter(e => !include || include(e));
   const content = events.map(e => JSON.stringify(e)).join('\n') + (events.length ? '\n' : '');
   writeFileSync(join(collabDir, 'events.jsonl'), content);
+  return content;
 }
 
 // nextEventId: legacy helper for v0.1.x sequential IDs (still produced by kickoff for
@@ -459,7 +568,11 @@ export const NO_PROGRESS_WINDOW_MS = 10 * 60 * 1000;
 export const VALID_TIMEOUT_ACTIONS = ['proceed-alone', 'reassign', 'degrade-and-continue', 'close-degraded'];
 
 const ISO_RE_OBL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
-const isChase = (e) => e.type === 'turn' && (e.payload?.intent === 'chase' || (e.payload?.signals || []).includes('chase'));
+// Turns the system writes about the session — chases and wait-cycle notices. They commit
+// their author to nothing and request nothing.
+export const isSystemTurn = (e) => e.type === 'turn'
+  && (e.payload?.intent === 'chase' || ['chase', 'wait-cycle'].some(s => (e.payload?.signals || []).includes(s)));
+const isChase = isSystemTurn;
 
 // Bookkeeping the system emits about itself. None of it advances the goal, so none of it
 // counts as progress.
@@ -471,44 +584,73 @@ const isSubstantive = (e) => {
 };
 
 /**
+ * A turn's deadline: the strict-ISO `next_update_by` it declared, otherwise its own
+ * timestamp plus one cadence. Computed at read time and never written back — the ledger
+ * keeps showing what the writer said, and every reader derives the same bound from it.
+ */
+export function effectiveDeadline(turn, events) {
+  const dl = turn?.payload?.next_update_by;
+  if (typeof dl === 'string' && ISO_RE_OBL.test(dl)) return dl;
+  return new Date(Date.parse(turn.ts) + getTickIntervalMs(events)).toISOString();
+}
+
+/**
+ * A turn's timeout action: the declared one when the vocabulary knows it, `proceed-alone`
+ * when nothing was declared (the only action that moves no ownership), and null when
+ * something was declared that the vocabulary does not know — that is an error, not an absence.
+ */
+export function effectiveOnTimeout(turn) {
+  const a = turn?.payload?.on_timeout;
+  if (a == null || a === '') return 'proceed-alone';
+  return VALID_TIMEOUT_ACTIONS.includes(a) ? a : null;
+}
+
+/**
  * What is owed right now. Pure: takes events, returns findings. The scanner decides, not
  * in-the-moment judgment, because an agent deep in a long session will just keep waiting.
+ *
+ * The bound and the reminder are separate things. The first check at or after a deadline
+ * takes the declared fallback (once per deadline, by whoever checks — the author's own tick
+ * included, since an absent counterpart is the case the bound exists for). Chases are
+ * reminders to someone else: they start after grace, stop at the flood limit, and never
+ * move the bound in either direction.
  */
 export function evaluateObligations(events, { now, self }) {
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
   const due = [], invalid = [];
 
+  // Every substantive turn is a commitment: the latest one per author carries that author's
+  // deadline, declared or defaulted. Chases and other system bookkeeping commit nobody.
   const latestPerAuthor = new Map();
   for (const e of events) {
-    if (e.type !== 'turn' || e.author === self) continue;
-    if (!e.payload?.next_update_by) continue;
+    if (e.type !== 'turn' || isChase(e)) continue;
     latestPerAuthor.set(e.author, e);
   }
 
   for (const [participant, e] of latestPerAuthor) {
-    const dl = e.payload.next_update_by;
-    if (!ISO_RE_OBL.test(dl)) continue;             // non-ISO deadlines are unreliable; skip
+    const dl = effectiveDeadline(e, events);
+    const action = effectiveOnTimeout(e);
 
-    // A wait with a deadline but no declared action is an unbounded wait.
-    if (!VALID_TIMEOUT_ACTIONS.includes(e.payload.on_timeout)) {
+    // A declared action the vocabulary does not know is an unbounded wait. Absence is not:
+    // it takes the default, the one action that moves no ownership.
+    if (action === null) {
       invalid.push({
         event_id: e.event_id, participant,
-        reason: `waiting with a deadline but no valid on_timeout (got ${JSON.stringify(e.payload.on_timeout)}); ` +
+        reason: `waiting with a deadline but an unrecognized on_timeout (got ${JSON.stringify(e.payload.on_timeout)}); ` +
                 `expected one of ${VALID_TIMEOUT_ACTIONS.join(', ')}`,
       });
       continue;
     }
-    if (nowMs - Date.parse(dl) < OBLIGATION_GRACE_MS) continue;
+    const dlMs = Date.parse(dl);
+    if (nowMs < dlMs) continue;
 
-    // Already discharged? Do not re-fire policy forever.
+    const chases = events.filter(x => isChase(x) && (x.payload?.signals || []).includes(participant) && Date.parse(x.ts) > dlMs).length;
     const settled = events.some(x => x.type === 'timeout-action' && x.payload?.participant === participant
-      && Date.parse(x.payload?.for_deadline || 0) === Date.parse(dl));
-    if (settled) continue;
-
-    const chases = events.filter(x => isChase(x) && Date.parse(x.ts) > Date.parse(dl)).length;
-    due.push(chases < CHASE_FLOOD_LIMIT
-      ? { participant, action: 'chase', for_deadline: dl, chases_so_far: chases }
-      : { participant, action: e.payload.on_timeout, for_deadline: dl, chases_so_far: chases });
+      && Date.parse(x.payload?.for_deadline || 0) === dlMs);
+    if (!settled) due.push({ participant, action, for_deadline: dl, chases_so_far: chases });
+    if (participant !== self && nowMs - dlMs >= OBLIGATION_GRACE_MS && chases < CHASE_FLOOD_LIMIT) {
+      due.push({ participant, action: 'chase', for_deadline: dl, chases_so_far: chases });
+    }
   }
 
   // Zero-progress escalation: a window containing only bookkeeping means the collaboration
@@ -560,7 +702,29 @@ export function getJoinedAgents(events) {
 }
 
 export function isClosed(events) { return events.some(e => e.type === 'close'); }
-export function hasJoined(events, triplet) { return events.some(e => e.type === 'join' && e.author === triplet); }
+
+// Exact membership. `participantId` is optional and matches the persisted id carried on
+// events emitted since identity became a minted value — a participant whose display triplet
+// was edited by hand still resolves through it.
+export function hasJoined(events, triplet, participantId) {
+  return events.some(e => e.type === 'join'
+    && (e.author === triplet || (participantId != null && e.participant_id === participantId)));
+}
+
+// Membership including the compatibility read for channels joined before participant ids
+// existed: same workspace, same machine, harness ignored, and only when unambiguous.
+export function hasJoinedIdentity(events, identity) {
+  if (!identity) return false;
+  if (hasJoined(events, identity.triplet, identity.participant_id)) return true;
+  const machine = identity.machine || parseTriplet(identity.triplet)?.machine;
+  const workspaceId = identity.workspace_id || parseTriplet(identity.triplet)?.workspaceId;
+  if (!machine || !workspaceId) return false;
+  return findAdmittedIdentity(events, {
+    workspaceId, machine,
+    participantId: identity.participant_id, triplet: identity.triplet,
+  }) != null;
+}
+
 export function hasDeclined(events, triplet) { return events.some(e => e.type === 'decline' && e.author === triplet); }
 
 export function findActiveProposeClose(events) {
@@ -619,6 +783,223 @@ export function checkSafetyNets(events, nowTs) {
   return null;
 }
 
+/**
+ * Participants whose own review is itself a ratified completion measure, declared on
+ * the kickoff as `payload.ratified_completion_measures`.
+ *
+ * For these participants silence is the missing evidence, not consent, so it is never
+ * converted into ratification. This is a NARROWING of silence-as-ratification, not a
+ * repeal: every participant not named here still ratifies by going quiet, so an
+ * offline peer can never wedge convergence forever.
+ *
+ * @returns {string[]} participant triplets, deduplicated
+ */
+export function requiredReviewers(events) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const measures = kickoff?.payload?.ratified_completion_measures;
+  if (!Array.isArray(measures)) return [];
+  return [...new Set(
+    measures.map(m => m?.requires_review_from).filter(t => typeof t === 'string' && t !== ''),
+  )];
+}
+
+/**
+ * Declared measures whose review has not arrived for the propose-close currently on
+ * the table. A measure is discharged by an explicit `ratify` OR an explicit `object`
+ * from the named reviewer after that propose-close — the measure is *a review*, not
+ * an accept, and an objection is a delivered review with a negative verdict.
+ *
+ * Scoping to the active propose-close is deliberate: a verdict on an earlier synthesis
+ * is not a verdict on this one. A reviewer who never joined, or who withdrew, or who is
+ * the proposer themselves, leaves the measure unmet — every one of those is a review
+ * that did not happen, and none of them may become a waiver.
+ *
+ * @returns {Array<object>} the unmet measures, verbatim from the kickoff
+ */
+export function unmetRequiredReviews(events, nowTs) {
+  const verdicts = measureVerdicts(events, nowTs);
+  return [...verdicts.values()]
+    .filter(v => v.ratified.length === 0 && v.objected.length === 0)
+    .map(v => v.measure);
+}
+
+// --- Eligibility: measures, scoped verdicts, and the close outcome ---
+//
+// Interpret by shape, guarantee at write. A verdict that names `measures` is scoped: it
+// credits exactly those ids, from declaration to terminal close. A verdict without the
+// field is the legacy shape: author-wide credit for every measure naming its author,
+// scoped to the propose-close on the table, as 1.1.0 read it. Both are labeled so a
+// receipt says how each credit was interpreted — the label proves nothing else.
+
+/** The kickoff's declared measures that name a reviewer, verbatim. Legacy ledgers: []. */
+export function declaredMeasures(events) {
+  const kickoff = events.find(e => e.type === 'kickoff');
+  const measures = kickoff?.payload?.ratified_completion_measures;
+  if (!Array.isArray(measures)) return [];
+  return measures.filter(m => m && typeof m.id === 'string' && typeof m.requires_review_from === 'string' && m.requires_review_from !== '');
+}
+
+/**
+ * Per-measure verdicts. Map id → { measure, ratified: [credit], objected: [credit] } where a
+ * credit is { by, scope: 'scoped'|'legacy', event_id, ts, reason? }. The first judgment a
+ * reviewer gives a measure stands; a later one on the same id is correspondence. A scoped
+ * verdict with any bad id credits nothing. Nothing after the close event counts.
+ */
+export function measureVerdicts(events) {
+  const out = new Map();
+  for (const m of declaredMeasures(events)) out.set(m.id, { measure: m, ratified: [], objected: [] });
+  if (out.size === 0) return out;
+  const closeIdx = events.findIndex(e => e.type === 'close');
+  const live = closeIdx === -1 ? events : events.slice(0, closeIdx);
+  let proposeIdx = -1;
+  live.forEach((e, i) => { if (e.type === 'propose-close') proposeIdx = i; });
+
+  const judged = new Set();                                // `${author}\n${id}`
+  const credit = (e, id, scope) => {
+    const key = `${e.author}\n${id}`;
+    if (judged.has(key)) return;
+    judged.add(key);
+    const c = { by: e.author, scope, event_id: e.event_id, ts: e.ts };
+    if (e.type === 'object') c.reason = e.payload?.reason;
+    out.get(id)[e.type === 'ratify' ? 'ratified' : 'objected'].push(c);
+  };
+
+  live.forEach((e, i) => {
+    if (e.type !== 'ratify' && e.type !== 'object') return;
+    const owed = [...out.values()].filter(v => v.measure.requires_review_from === e.author).map(v => v.measure.id);
+    if (owed.length === 0) return;                         // not a named reviewer: synthesis-only
+    if ('measures' in (e.payload || {})) {
+      const ids = e.payload.measures;
+      if (!Array.isArray(ids) || ids.length === 0) return; // unscoped: refused at write, ignored here
+      if (ids.some(id => !owed.includes(id) || judged.has(`${e.author}\n${id}`))) return; // whole-event refusal
+      for (const id of ids) credit(e, id, 'scoped');
+    } else if (proposeIdx !== -1 && i > proposeIdx) {
+      for (const id of owed) credit(e, id, 'legacy');
+    }
+  });
+  return out;
+}
+
+/**
+ * The one outcome calculation both close routes share. Returns null when the ledger declares
+ * no measures (a legacy session has no contract to compute). Any objection → failed-safely;
+ * any credit → complete-to-authority-boundary; nothing → failed-safely. Only the proposer
+ * route, with every measure ratified and the synthesis converged, may say converged.
+ */
+export function computeCloseOutcome(events, nowTs, { route } = {}) {
+  const verdicts = measureVerdicts(events);
+  if (verdicts.size === 0) return null;
+  const ratified_measures = [], objected_measures = [], unmet_ratified_measures = [];
+  for (const v of verdicts.values()) {
+    if (v.objected.length) for (const o of v.objected) objected_measures.push({ id: v.measure.id, by: o.by, reason: o.reason, scope: o.scope, event_id: o.event_id });
+    else if (v.ratified.length) ratified_measures.push({ id: v.measure.id, by: v.ratified[0].by, scope: v.ratified[0].scope, event_id: v.ratified[0].event_id });
+    else unmet_ratified_measures.push(v.measure);
+  }
+  const status = getRatificationStatus(events, nowTs);
+  let outcome = 'failed-safely';
+  if (objected_measures.length === 0 && ratified_measures.length > 0) {
+    outcome = (route === 'proposer' && unmet_ratified_measures.length === 0 && status?.converged)
+      ? 'converged' : 'complete-to-authority-boundary';
+  }
+  const via = route === 'stall' ? 'the stall net' : route === 'wall-clock' ? 'the wall-clock net' : 'the proposer route';
+  const note = outcome === 'converged'
+    ? 'Every declared measure carries a review from its named reviewer and the synthesis is ratified.'
+    : `Closed via ${via}. Measures listed as ratified carry a verdict from their named reviewer; `
+      + 'unmet ones never received a review and were not waived; objected ones block completion. '
+      + 'This is not a consensus and must not be described as one.';
+  return {
+    outcome,
+    receipt: {
+      ratified_measures, objected_measures, unmet_ratified_measures,
+      missing_reviews_from: [...new Set(unmet_ratified_measures.map(m => m.requires_review_from))],
+      ratified_by: status ? status.explicitRatified : [],
+      note,
+    },
+  };
+}
+
+// --- Requests you can see ---
+//
+// Every v1 turn names `waiting_on`; nobody read it from the recipient's side. A request is
+// open from the requesting turn until a disposition tied to it by reference: the recipient's
+// `declined` or `delivered` signal (or a scoped verdict), or the requester's own timeout
+// fallback (`lapsed`). `accepted` changes the state, not the visibility. Any other turn that
+// merely references the request changes nothing.
+
+const REQUEST_SIGNALS = ['accepted', 'declined', 'delivered'];
+
+/**
+ * Open requests on `participant`, oldest first. `includeClosed` returns the whole lifecycle.
+ *
+ * Delivery by verdict reuses accepted-credit semantics: only a SCOPED verdict the reader
+ * credits (see `measureVerdicts`) can discharge a request, and only if it judges what the
+ * request asked for — a request may name the measures it is about in `measures`; one that
+ * names none is delivered by any credited scoped verdict that references it. A legacy bare
+ * verdict is measure credit under the replay rule and delivers nothing: it never said what
+ * it judged, so it cannot be an answer to a request.
+ */
+export function openRequests(events, participant, { includeClosed = false } = {}) {
+  const out = [];
+  // event_id → the measure ids that event was credited for, scoped credits only
+  const credited = new Map();
+  for (const v of measureVerdicts(events).values()) {
+    for (const c of [...v.ratified, ...v.objected]) {
+      if (c.scope === 'scoped') credited.set(c.event_id, [...(credited.get(c.event_id) || []), v.measure.id]);
+    }
+  }
+  for (const e of events) {
+    if (e.type !== 'turn' || isChase(e) || e.author === participant) continue;
+    const to = e.payload?.waiting_on;
+    const names = Array.isArray(to) ? to.includes(participant) : to === participant;
+    if (!names) continue;
+    const about = Array.isArray(e.payload?.measures) ? e.payload.measures : [];
+    const req = {
+      request_id: e.event_id, from: e.author, to: participant, ts: e.ts,
+      body: e.payload?.body || '', measures: about, deadline: effectiveDeadline(e, events),
+      on_timeout: effectiveOnTimeout(e) || 'proceed-alone', state: 'requested',
+    };
+    for (const x of events) {
+      if (Date.parse(x.ts) < Date.parse(e.ts) || x === e) continue;
+      if (x.type === 'timeout-action' && x.payload?.participant === e.author
+          && Date.parse(x.payload?.for_deadline || 0) === Date.parse(req.deadline)) { req.state = 'lapsed'; break; }
+      if (x.author !== participant || !(x.references || []).includes(e.event_id)) continue;
+      if (x.type === 'ratify' || x.type === 'object') {
+        const ids = credited.get(x.event_id);
+        if (ids && (about.length === 0 || about.some(id => ids.includes(id)))) { req.state = 'delivered'; break; }
+        continue;
+      }
+      if (x.type !== 'turn') continue;
+      const sig = REQUEST_SIGNALS.find(s => (x.payload?.signals || []).includes(s));
+      if (sig === 'accepted') req.state = 'accepted';
+      else if (sig) { req.state = sig; break; }
+    }
+    if (includeClosed || req.state === 'requested' || req.state === 'accepted') out.push(req);
+  }
+  return out;
+}
+
+/**
+ * Mutual open requests: A waits on B while B waits on A. One pair per unordered participant
+ * pair, keyed by the two request ids so a repeated report on an unchanged pair can be
+ * suppressed. Acceptance on both sides is still a cycle; a disposition dissolves it.
+ */
+export function waitCycles(events) {
+  const authors = [...new Set(events.filter(e => e.type === 'turn').map(e => e.author))];
+  const open = new Map(authors.map(a => [a, openRequests(events, a)]));
+  const cycles = [];
+  for (let i = 0; i < authors.length; i++) {
+    for (let j = i + 1; j < authors.length; j++) {
+      const a = authors[i], b = authors[j];
+      const ab = open.get(b).find(r => r.from === a);   // a waits on b
+      const ba = open.get(a).find(r => r.from === b);   // b waits on a
+      if (!ab || !ba) continue;
+      const requests = [ab.request_id, ba.request_id].sort();
+      cycles.push({ key: requests.join('+'), participants: [a, b], requests });
+    }
+  }
+  return cycles;
+}
+
 export function getRatificationStatus(events, nowTs) {
   // Find the latest propose-close (not nullified by a subsequent object — that's
   // findActiveProposeClose's job; here we still want to report ratification state
@@ -646,10 +1027,16 @@ export function getRatificationStatus(events, nowTs) {
   const silenceRatifyMs = getRatificationWindowMs(events);
   const eligibleForSilenceRatify = silenceElapsed > silenceRatifyMs;
 
+  // ...except from a participant whose own review is a ratified completion measure.
+  // There, silence IS the missing evidence, so reading it as consent would synthesize
+  // the very accept the measure exists to require.
+  const required = new Set(requiredReviewers(events));
+
   const implicitRatified = new Set();
   if (eligibleForSilenceRatify) {
     for (const agent of others) {
       if (explicitRatified.has(agent) || objected.has(agent)) continue;
+      if (required.has(agent)) continue;
       // Has this agent emitted ANY event since propose-close?
       const agentEventsSince = after.some(e => e.author === agent);
       if (!agentEventsSince) implicitRatified.add(agent);
@@ -666,6 +1053,7 @@ export function getRatificationStatus(events, nowTs) {
     implicitRatified: [...implicitRatified],
     objected: [...objected],
     pending,
+    requiredReviewers: [...required],
     converged: pending.length === 0 && objected.size === 0,
   };
 }
@@ -791,9 +1179,13 @@ export function acquireRepoClaim(repo, owner, now = Date.now()) {
   if (existsSync(claimPath)) {
     let held = null;
     try { held = JSON.parse(readFileSync(claimPath, 'utf8')); } catch { /* corrupt → reclaimable */ }
-    const age = now - statSync(claimPath).mtimeMs;
-    if (age < REPO_CLAIM_TTL_MS) return null;      // live owner
-    generation = (held?.generation ?? 0) + 1;       // expired lease → reclaim
+    // The holder can release between the check above and this stat — that is a
+    // holder doing its job, not an error. A vanished claim means nobody holds it,
+    // so fall through to the link, which is what actually decides the winner.
+    let age = null;
+    try { age = now - statSync(claimPath).mtimeMs; } catch { /* released → reclaimable */ }
+    if (age !== null && age < REPO_CLAIM_TTL_MS) return null;   // live owner
+    generation = (held?.generation ?? 0) + 1;       // expired or gone → reclaim
     try { unlinkSync(claimPath); } catch { /* raced; the link below decides */ }
   }
 
@@ -847,7 +1239,13 @@ export function gitPullRebase(transport, owner = `pid-${process.pid}`) {
   const repo = repoForTransport(transport);
   // Throws rather than returning empty: a caller that swallows this reports a quiet
   // channel, which is indistinguishable from no peer activity.
-  return withRepoClaim(repo, owner, () => { runGit(repo, ['pull', '--rebase']); });
+  // --autostash is explicit: a dirty working tree (a modified tracked file, an edited published
+  // event) must be preserved through the pull so the delivery boundary can see and block on it.
+  // Without the flag the behavior depends on the user's rebase.autostash setting, and a plain
+  // `git pull --rebase` refuses on unstaged changes.
+  // ponytail: a stash pop that conflicts with upstream leaves the stash in place and the file
+  // in conflict state; the tick then blocks on the modified file as it would on any edit.
+  return withRepoClaim(repo, owner, () => { runGit(repo, ['pull', '--rebase', '--autostash']); });
 }
 
 // Every git call goes through here. An unchecked spawnSync discards status, signal and
@@ -864,6 +1262,213 @@ function runGit(repo, args, { allowFail = false } = {}) {
     throw err;
   }
   return { ok, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+// --- Owned artifacts: recoverable ownership evidence for delivery ---
+//
+// Location is not ownership. What this plugin writes for a participant is recorded, by git
+// blob hash, in a manifest outside the repository, so that delivery can recognise its own
+// work in any state — untracked, staged, modified, or already committed — and nothing else.
+// Event files carry their own evidence (the author inside them); renders and KICKOFF.md do
+// not, so they are recorded when written.
+
+export function deliveryManifestPath(collabDir, author) {
+  const key = createHash('sha1').update(resolve(collabDir)).digest('hex').slice(0, 16);
+  return join(dirname(localCollabsRoot()), 'delivery', authorSlugFromTriplet(author), `${key}.json`);
+}
+
+/** git's blob id for these bytes: sha1("blob <len>\0" + bytes). */
+export function gitBlobHash(bytes) {
+  const b = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex');
+}
+
+/**
+ * The manifest: channel-relative path → blob ids this participant's plugin wrote there.
+ * Unreadable or corrupt reads as empty — the safe direction: a render with no evidence is
+ * listed as foreign and preserved, never published. Concurrent writers for the same
+ * participant on one machine can lose each other's entry the same way; a lost entry
+ * demotes a render to foreign, it never promotes anything.
+ */
+export function readDeliveryManifest(collabDir, author) {
+  try {
+    const m = JSON.parse(readFileSync(deliveryManifestPath(collabDir, author), 'utf8'));
+    return m && typeof m === 'object' && !Array.isArray(m) ? m : {};
+  } catch { return {}; }
+}
+
+/** Ownership is bound to the path AND the bytes: bytes recorded for one path authorize no other. */
+export function isRecordedArtifact(manifest, relPath, blobHash) {
+  return Array.isArray(manifest[relPath]) && manifest[relPath].includes(blobHash);
+}
+
+/** Record that `author`'s plugin wrote these bytes at `relPath` in the channel. Returns the blob id. */
+export function recordOwnedArtifact(collabDir, author, relPath, bytes) {
+  const p = deliveryManifestPath(collabDir, author);
+  const m = readDeliveryManifest(collabDir, author);
+  const h = gitBlobHash(bytes);
+  const list = Array.isArray(m[relPath]) ? m[relPath] : [];
+  if (!list.includes(h)) list.push(h);
+  m[relPath] = list;
+  mkdirSync(dirname(p), { recursive: true });
+  // Atomic replace: an interrupted write leaves the previous manifest, never a torn one.
+  const tmp = `${p}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(m, null, 2));
+  renameSync(tmp, p);
+  return h;
+}
+
+/** The bytes of a blob the repository holds, as text. */
+export function gitBlobText(transport, blob) {
+  return runGit(repoForTransport(transport), ['cat-file', '-p', blob]).stdout;
+}
+
+/**
+ * Events the upstream publishes only as lines of `events.jsonl` (a legacy writer's footprint):
+ * event id → the parsed object and its canonical string. A local file that carries one of these
+ * ids with different content is a conflict between two representations of one published event.
+ */
+export function gitUpstreamJsonl(collabDir, transport, upstream = gitUpstreamBlobs(collabDir, transport)) {
+  const out = new Map();
+  if (!upstream.has('events.jsonl')) return out;
+  for (const line of gitBlobText(transport, upstream.get('events.jsonl')).split('\n')) {
+    if (!line.trim()) continue;
+    try { const o = JSON.parse(line); if (o?.event_id) out.set(o.event_id, { event: o, canonical: JSON.stringify(o) }); } catch { /* not an event line */ }
+  }
+  return out;
+}
+
+/** Files under events/ that are not `<event_id>.json` for the event they contain — never read as events. */
+export function eventFilenameViolations(collabDir) {
+  const eventsDir = join(collabDir, 'events');
+  if (!existsSync(eventsDir)) return [];
+  const out = [];
+  for (const name of readdirSync(eventsDir)) {
+    if (!name.endsWith('.json') || name.startsWith('.')) continue;
+    try {
+      const e = JSON.parse(readFileSync(join(eventsDir, name), 'utf8'));
+      if (e && typeof e === 'object' && e.event_id && name !== `${e.event_id}.json`) out.push(join('events', name));
+    } catch { /* unreadable: not an event, not a violation of this rule */ }
+  }
+  return out.sort();
+}
+
+/** Channel-relative path → blob id for everything the upstream branch holds under the channel. */
+export function gitUpstreamBlobs(collabDir, transport) {
+  const repo = repoForTransport(transport);
+  const rel = relative(repo, collabDir);
+  const out = new Map();
+  const r = runGit(repo, ['ls-tree', '-r', '@{u}', '--', collabDir], { allowFail: true });
+  if (!r.ok) return out;
+  for (const line of r.stdout.split('\n').filter(Boolean)) {
+    const [meta, path] = line.split('\t');
+    out.set(relative(rel, path), meta.split(' ')[2]);
+  }
+  return out;
+}
+
+/**
+ * Deliver what this participant owes the branch, and nothing else.
+ *
+ * Ownership is evidence, not location: a file under `events/` whose name is its event id and
+ * whose author is `author`, or any blob this participant's plugin recorded when it wrote it
+ * (renders, KICKOFF.md). That rule is applied in every state. Uncommitted: owned files are
+ * staged and committed `--only` those paths, so an unrelated index entry stays staged; a
+ * foreign new file (another participant's unpublished event, a stray draft) is reported and
+ * never staged; a tracked file modified into something unowned, or deleted, blocks delivery.
+ * Committed: every commit ahead of the upstream is inspected blob by blob; if all of them
+ * carry only owned blobs inside this channel they are pushed, otherwise the push is blocked
+ * and the commits preserved. Nothing is cleaned up to get past a block.
+ *
+ * A clean working tree is not a delivery receipt; the push is verified against the upstream
+ * ref afterwards, not assumed from exit 0.
+ */
+export function deliverChannel(collabDir, transport, author, message, owner = `pid-${process.pid}`) {
+  const repo = repoForTransport(transport);
+  const rel = relative(repo, collabDir);
+  const eventsRel = join(rel, 'events');
+  const manifest = readDeliveryManifest(collabDir, author);
+  const recorded = (path, hash) => isRecordedArtifact(manifest, relative(rel, path), hash);
+  const upstreamJsonl = gitUpstreamJsonl(collabDir, transport);
+  // A new event file is this participant's only if its author is, AND its id is not already
+  // published in another representation with different content — a file that contradicts a
+  // published JSONL line is a conflict, not a new event, whoever wrote it.
+  const isOwnedEvent = (path, text) => {
+    const base = basename(path);
+    if (dirname(path) !== eventsRel || !base.endsWith('.json') || base.startsWith('.')) return false;
+    try {
+      const e = JSON.parse(text);
+      if (e?.event_id !== base.slice(0, -5) || e?.author !== author) return false;
+      const published = upstreamJsonl.get(e.event_id);
+      return !published || published.canonical === JSON.stringify(e);
+    } catch { return false; }
+  };
+  const inChannel = (p) => p === rel || p.startsWith(rel + '/');
+
+  // The hard stop applies at this boundary too: nothing is committed or pushed from a channel
+  // holding a file under events/ that is not named for the event it contains.
+  const violations = eventFilenameViolations(collabDir);
+  if (violations.length) {
+    return { published_paths: [], foreign_paths: [], blocked: { reason: 'event-filename-violation', paths: violations }, pushed: false, verified: false };
+  }
+  return withRepoClaim(repo, owner, () => {
+    const status = runGit(repo, ['status', '--porcelain', '--untracked-files=all', '--', collabDir]).stdout.split('\n').filter(Boolean);
+    const owned = [], foreign = [], blocked = [];
+    for (const line of status) {
+      const code = line.slice(0, 2), path = line.slice(3);
+      const isNew = code === '??' || code === 'A ';
+      const isModified = /^[ MA]M$|^M[ M]$/.test(code);
+      if (!isNew && !isModified) { blocked.push(path); continue; }        // deleted, renamed, unmerged
+      const bytes = readFileSync(join(repo, path));
+      // Events are never rewritten by this plugin, so the author inside one is evidence only
+      // for a NEW file; a tracked file that changed is owned only if its bytes are a render
+      // this participant recorded.
+      const mine = recorded(path, gitBlobHash(bytes)) || (isNew && isOwnedEvent(path, bytes.toString('utf8')));
+      if (mine) owned.push(path);
+      else if (isNew) foreign.push(path);
+      else blocked.push(path);                                             // a tracked file changed into something not ours
+    }
+    const result = { published_paths: [], foreign_paths: foreign, blocked: null, pushed: false, verified: false };
+    const verify = () => { result.verified = runGit(repo, ['rev-parse', 'HEAD']).stdout.trim() === runGit(repo, ['rev-parse', '@{u}'], { allowFail: true }).stdout.trim(); };
+
+    if (blocked.length) {
+      result.blocked = { reason: 'modified-tracked-files', paths: blocked };
+      verify();
+      return result;
+    }
+    if (owned.length) {
+      runGit(repo, ['add', '--', ...owned]);
+      runGit(repo, ['commit', '--only', '-m', message, '--', ...owned]);
+      result.published_paths = owned;
+    }
+
+    const upstream = runGit(repo, ['rev-parse', '--abbrev-ref', '@{u}'], { allowFail: true });
+    if (!upstream.ok) { result.blocked = { reason: 'no-upstream', paths: [] }; return result; }
+    const ahead = runGit(repo, ['rev-list', '@{u}..HEAD']).stdout.split('\n').filter(Boolean);
+    // `:<oldmode> <newmode> <oldblob> <newblob> <status>\t<path>` per changed path.
+    const unrelated = ahead.filter(sha => runGit(repo, ['diff-tree', '--no-commit-id', '-r', '--raw', sha]).stdout
+      .split('\n').filter(Boolean).some(line => {
+        const [meta, path] = line.split('\t');
+        const [, , , newBlob, st] = meta.split(' ');
+        if (!inChannel(path) || st.startsWith('D')) return true;
+        if (recorded(path, newBlob)) return false;
+        return !(st === 'A' && isOwnedEvent(path, runGit(repo, ['cat-file', '-p', newBlob]).stdout));
+      }));
+    if (unrelated.length) {
+      result.blocked = { reason: 'unrelated-unpushed-commits', paths: unrelated };
+      verify();
+      return result;
+    }
+    if (ahead.length) {
+      for (let i = 1; i <= 3; i++) {
+        if (runGit(repo, ['push'], { allowFail: true }).ok) { result.pushed = true; break; }
+        runGit(repo, ['pull', '--rebase']);
+      }
+      if (!result.pushed) throw new Error(`git push failed after 3 attempts in ${repo}`);
+    }
+    verify();
+    return result;
+  });
 }
 
 export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${process.pid}`) {
