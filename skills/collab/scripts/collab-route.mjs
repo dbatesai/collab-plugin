@@ -1,5 +1,5 @@
 /**
- * collab-route.mjs — deterministic message → action discriminator (DC-77).
+ * collab-route.mjs — deterministic message → action discriminator.
  *
  * Pure routing: takes a natural-language message and current collab state,
  * returns one of: kickoff | join | tick | status | abort | fuzzy.

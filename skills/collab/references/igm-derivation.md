@@ -30,7 +30,7 @@ Joined agents can sharpen the IGM via `turn` with `intent: clarify` in their fir
 ## Good example
 
 ```yaml
-intention: "Validate that DC-85 Phase 1b meets design goals before v2.3 release"
+intention: "Validate that Phase 1b meets design goals before v2.3 release"
 goal: "Explicit go/no-go on IGM compliance, with a change list if no-go"
 measure: "Per-dimension boolean + rationale from each participant. NOT satisfied by: vague agreement or 'looks good' without specifics."
 ```
