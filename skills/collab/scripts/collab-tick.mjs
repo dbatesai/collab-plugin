@@ -21,7 +21,7 @@ import {
   getJoinedAgents, computeCloseOutcome, validateMeasures,
   openRequests, waitCycles, evaluateObligations, executeTimeoutAction, isSystemTurn,
   OBLIGATION_GRACE_MS,
-  gitPullRebase, gitCommitPush, deliverChannel,
+  gitPullRebase, deliverChannel,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
 } from './collab-event-helpers.mjs';
@@ -122,7 +122,10 @@ export async function tickDeterministic(slug, options = {}) {
   const route = detectRoute(events, triplet, nowTs);
 
   if (route === 'closed') {
-    return { action: 'exit', reason: 'closed', slug };
+    // Terminal state suppresses execution, not delivery: a close this participant appended
+    // and never got to the remote is still owed. Deliver first, then exit.
+    const delivery = (!dryRun && isGitTransport(transport)) ? deliverChannel(dir, transport, triplet, `[${triplet}] deliver: ${slug}`) : null;
+    return { action: 'exit', reason: 'closed', slug, delivery };
   }
 
   // A declaration this plugin would not have written (a hand edit, an older writer) is
@@ -153,12 +156,13 @@ export async function tickDeterministic(slug, options = {}) {
       event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)), ts: nowTs, author: triplet, slug, ...stamp, type: 'close', references: [],
       payload,
     };
+    let delivery = null;
     if (!dryRun) {
       appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet });
-      if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${payload.outcome})`);
+      await render(slug, { collabDir: dir, author: triplet, publish: false });
+      if (isGitTransport(transport)) delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (${payload.outcome})`);
     }
-    return { action: 'close', reason: net, event: ev };
+    return { action: 'close', reason: net, event: ev, delivery };
   }
 
   if (route === 'terminal:authority-boundary') {
@@ -171,14 +175,15 @@ export async function tickDeterministic(slug, options = {}) {
       // terminal record that does not say this is just a different word for the same silence.
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: contract.outcome, ...contract.receipt },
     };
+    let delivery = null;
     if (!dryRun) {
       appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet });
+      await render(slug, { collabDir: dir, author: triplet, publish: false });
       if (isGitTransport(transport)) {
-        gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (${contract.outcome})`);
+        delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (${contract.outcome})`);
       }
     }
-    return { action: 'close', reason: 'authority-boundary', event: ev };
+    return { action: 'close', reason: 'authority-boundary', event: ev, delivery };
   }
 
   if (route === 'emit-close') {
@@ -188,12 +193,13 @@ export async function tickDeterministic(slug, options = {}) {
       references: [rat.proposeClose.event_id],
       payload: { final_synthesis: rat.proposeClose.payload.synthesis, outcome: 'converged' },
     };
+    let delivery = null;
     if (!dryRun) {
       appendEvent(dir, ev);
-      await render(slug, { collabDir: dir, author: triplet });
-      if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] close: ${slug} ${ev.event_id} (converged)`);
+      await render(slug, { collabDir: dir, author: triplet, publish: false });
+      if (isGitTransport(transport)) delivery = deliverChannel(dir, transport, triplet, `[${triplet}] close: ${slug} ${ev.event_id} (converged)`);
     }
-    return { action: 'close', reason: 'converged', event: ev };
+    return { action: 'close', reason: 'converged', event: ev, delivery };
   }
 
   // v1.0 #6: deterministic chase emission before handing off to LLM.

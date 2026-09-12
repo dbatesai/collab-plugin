@@ -9,7 +9,7 @@ import {
   readFileSync, writeFileSync,
   existsSync, mkdirSync, readdirSync, linkSync, unlinkSync, statSync,
 } from 'node:fs';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { join, resolve, dirname, relative, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
@@ -1233,46 +1233,95 @@ function runGit(repo, args, { allowFail = false } = {}) {
   return { ok, stdout: r.stdout || '', stderr: r.stderr || '' };
 }
 
+// --- Owned artifacts: recoverable ownership evidence for delivery ---
+//
+// Location is not ownership. What this plugin writes for a participant is recorded, by git
+// blob hash, in a manifest outside the repository, so that delivery can recognise its own
+// work in any state — untracked, staged, modified, or already committed — and nothing else.
+// Event files carry their own evidence (the author inside them); renders and KICKOFF.md do
+// not, so they are recorded when written.
+
+function deliveryManifestPath(collabDir, author) {
+  const key = createHash('sha1').update(resolve(collabDir)).digest('hex').slice(0, 16);
+  return join(dirname(localCollabsRoot()), 'delivery', authorSlugFromTriplet(author), `${key}.json`);
+}
+
+/** git's blob id for these bytes: sha1("blob <len>\0" + bytes). */
+export function gitBlobHash(bytes) {
+  const b = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+  return createHash('sha1').update(`blob ${b.length}\0`).update(b).digest('hex');
+}
+
+/** Record that `author`'s plugin wrote these bytes at `relPath` in the channel. Returns the blob id. */
+export function recordOwnedArtifact(collabDir, author, relPath, bytes) {
+  const p = deliveryManifestPath(collabDir, author);
+  let m = {};
+  try { m = JSON.parse(readFileSync(p, 'utf8')); } catch { /* first artifact */ }
+  const h = gitBlobHash(bytes);
+  const list = Array.isArray(m[relPath]) ? m[relPath] : [];
+  if (!list.includes(h)) list.push(h);
+  m[relPath] = list;
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(m, null, 2));
+  return h;
+}
+
+function ownedBlobHashes(collabDir, author) {
+  try { return new Set(Object.values(JSON.parse(readFileSync(deliveryManifestPath(collabDir, author), 'utf8'))).flat()); }
+  catch { return new Set(); }
+}
+
 /**
  * Deliver what this participant owes the branch, and nothing else.
  *
- * Two boundaries, kept separate. The publisher stages only records it can claim: files under
- * `events/` whose name is their event id and whose author is `author` — an interrupted tick's
- * chase, timeout record, or wait-cycle notice. Everything else in the channel is left exactly
- * as found: another participant's unpublished file and a stray draft are reported as foreign
- * and never staged; a modified or deleted tracked file blocks delivery outright, because a
- * push over a hand edit to committed history is not this tick's to make. The commit is
- * `--only` the owned paths, so an unrelated index entry stays staged and uncommitted.
+ * Ownership is evidence, not location: a file under `events/` whose name is its event id and
+ * whose author is `author`, or any blob this participant's plugin recorded when it wrote it
+ * (renders, KICKOFF.md). That rule is applied in every state. Uncommitted: owned files are
+ * staged and committed `--only` those paths, so an unrelated index entry stays staged; a
+ * foreign new file (another participant's unpublished event, a stray draft) is reported and
+ * never staged; a tracked file modified into something unowned, or deleted, blocks delivery.
+ * Committed: every commit ahead of the upstream is inspected blob by blob; if all of them
+ * carry only owned blobs inside this channel they are pushed, otherwise the push is blocked
+ * and the commits preserved. Nothing is cleaned up to get past a block.
  *
- * The retry gate looks past the working tree: a clean tree is not a delivery receipt. Any
- * commit ahead of the upstream is inspected; if every one touches only this channel it is
- * pushed, and if any touches something else the push is blocked and the commit preserved.
- * Delivery is verified against the upstream ref after the push, not assumed from exit 0.
+ * A clean working tree is not a delivery receipt; the push is verified against the upstream
+ * ref afterwards, not assumed from exit 0.
  */
 export function deliverChannel(collabDir, transport, author, message, owner = `pid-${process.pid}`) {
   const repo = repoForTransport(transport);
   const rel = relative(repo, collabDir);
   const eventsRel = join(rel, 'events');
+  const manifest = ownedBlobHashes(collabDir, author);
+  const isOwnedEvent = (path, text) => {
+    const base = basename(path);
+    if (dirname(path) !== eventsRel || !base.endsWith('.json') || base.startsWith('.')) return false;
+    try { const e = JSON.parse(text); return e?.event_id === base.slice(0, -5) && e?.author === author; }
+    catch { return false; }
+  };
+  const inChannel = (p) => p === rel || p.startsWith(rel + '/');
+
   return withRepoClaim(repo, owner, () => {
     const status = runGit(repo, ['status', '--porcelain', '--untracked-files=all', '--', collabDir]).stdout.split('\n').filter(Boolean);
-    const owned = [], foreign = [], modified = [];
+    const owned = [], foreign = [], blocked = [];
     for (const line of status) {
       const code = line.slice(0, 2), path = line.slice(3);
-      if (code !== '??' && code !== 'A ') { modified.push(path); continue; }
-      const base = basename(path);
-      if (dirname(path) === eventsRel && base.endsWith('.json') && !base.startsWith('.')) {
-        try {
-          const e = JSON.parse(readFileSync(join(repo, path), 'utf8'));
-          if (e?.event_id === base.slice(0, -5) && e?.author === author) { owned.push(path); continue; }
-        } catch { /* not an event: foreign */ }
-      }
-      foreign.push(path);
+      const isNew = code === '??' || code === 'A ';
+      const isModified = /^[ MA]M$|^M[ M]$/.test(code);
+      if (!isNew && !isModified) { blocked.push(path); continue; }        // deleted, renamed, unmerged
+      const bytes = readFileSync(join(repo, path));
+      // Events are never rewritten by this plugin, so the author inside one is evidence only
+      // for a NEW file; a tracked file that changed is owned only if its bytes are a render
+      // this participant recorded.
+      const mine = manifest.has(gitBlobHash(bytes)) || (isNew && isOwnedEvent(path, bytes.toString('utf8')));
+      if (mine) owned.push(path);
+      else if (isNew) foreign.push(path);
+      else blocked.push(path);                                             // a tracked file changed into something not ours
     }
     const result = { published_paths: [], foreign_paths: foreign, blocked: null, pushed: false, verified: false };
     const verify = () => { result.verified = runGit(repo, ['rev-parse', 'HEAD']).stdout.trim() === runGit(repo, ['rev-parse', '@{u}'], { allowFail: true }).stdout.trim(); };
 
-    if (modified.length) {
-      result.blocked = { reason: 'modified-tracked-files', paths: modified };
+    if (blocked.length) {
+      result.blocked = { reason: 'modified-tracked-files', paths: blocked };
       verify();
       return result;
     }
@@ -1285,8 +1334,15 @@ export function deliverChannel(collabDir, transport, author, message, owner = `p
     const upstream = runGit(repo, ['rev-parse', '--abbrev-ref', '@{u}'], { allowFail: true });
     if (!upstream.ok) { result.blocked = { reason: 'no-upstream', paths: [] }; return result; }
     const ahead = runGit(repo, ['rev-list', '@{u}..HEAD']).stdout.split('\n').filter(Boolean);
-    const unrelated = ahead.filter(sha => runGit(repo, ['diff-tree', '--no-commit-id', '--name-only', '-r', sha]).stdout
-      .split('\n').filter(Boolean).some(p => p !== rel && !p.startsWith(rel + '/')));
+    // `:<oldmode> <newmode> <oldblob> <newblob> <status>\t<path>` per changed path.
+    const unrelated = ahead.filter(sha => runGit(repo, ['diff-tree', '--no-commit-id', '-r', '--raw', sha]).stdout
+      .split('\n').filter(Boolean).some(line => {
+        const [meta, path] = line.split('\t');
+        const [, , , newBlob, st] = meta.split(' ');
+        if (!inChannel(path) || st.startsWith('D')) return true;
+        if (manifest.has(newBlob)) return false;
+        return !(st === 'A' && isOwnedEvent(path, runGit(repo, ['cat-file', '-p', newBlob]).stdout));
+      }));
     if (unrelated.length) {
       result.blocked = { reason: 'unrelated-unpushed-commits', paths: unrelated };
       verify();

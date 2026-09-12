@@ -110,6 +110,16 @@ R3-H1, R3-H2, R3-M1 closed by Hale at `c6b0901`. Two High findings remained, bot
 
 Mutation controls added: M14 (author check dropped → a foreign event is published) and M15 (unpushed commits ignored → the after-commit record is never delivered).
 
+## Round 3, fourth pass — Hale's review of `8918079` (`hale-to-muse-third-candidate-boundary-review-2026-09-11-5952a2c.md`)
+
+R3-H3 closed by Hale. R3-H4 stayed open on two counterexamples and R3-H5 was new; all three reproduced and fixed tests-first (3 red / 9 in `test-collab-git-delivery.mjs` on `8918079`, green after).
+
+- **R3-H4, committed work judged by location.** The ahead-commit gate checked only the channel path prefix, so a draft *committed* inside the channel was pushed with a clean receipt. Ownership is now evidence in every state: a new event file authored by the participant, or bytes recorded in a per-participant manifest (`~/.collab/delivery/<participant>/<channel>.json`, git blob hashes) when the plugin wrote them — `render()` records STATUS.md, `turns/*.md`, `events.jsonl`; kickoff records `KICKOFF.md` and `events.jsonl`. Commits ahead of the upstream are inspected blob by blob; a committed draft, a deletion, or a committed hand edit to an event (events are immutable, so the author inside a *modified* file proves nothing) blocks the push and is preserved. Tests: committed draft → blocked, remote unchanged, commit preserved; committed edit to the participant's own join event → blocked.
+- **R3-H4, sibling routes.** The three close routes rendered and then called the whole-directory publisher (twice, since `render()` also published). `render()` now takes `publish: false` from the tick and records what it writes; the close routes and kickoff call `deliverChannel`; `render()`'s own publish goes through it too. `gitCommitPush` has no remaining caller in the plugin. Test: authority-boundary close with a stray draft present → close event, STATUS.md and events.jsonl on the remote, draft absent and intact, `delivery.foreign_paths` names it.
+- **R3-H5, terminal interruption.** The `closed` route returned before any delivery. It now delivers first (owned close event, renders) and then exits. Test: close appended and left untracked, and close appended and committed locally — both reach the remote on the next tick, once, `pushed`/`verified` true, still one close, still `exit closed`; a further tick publishes nothing.
+
+Mutation controls added: M16 (renders not recorded → the close route cannot deliver STATUS.md) and M17 (committed work judged by location → the committed draft is pushed).
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

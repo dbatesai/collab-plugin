@@ -3,14 +3,14 @@
  * Idempotent. Commits + pushes after render.
  * CLI: node collab-render.mjs <slug>
  */
-import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   findCollabDir, readEvents, getJoinedAgents,
   findActiveProposeClose, getRatificationStatus,
-  checkSafetyNets, gitCommitPush, authorSlugFromTriplet, reconcileForeignSurface,
+  checkSafetyNets, deliverChannel, recordOwnedArtifact, authorSlugFromTriplet, reconcileForeignSurface,
   renderEventsJsonl, measureVerdicts, openRequests,
   STALL_TICKS, TICK_INTERVAL_MS,
 } from './collab-event-helpers.mjs';
@@ -120,7 +120,7 @@ export function buildTurnMd(event) {
 }
 
 export async function render(slug, options = {}) {
-  const { collabDir, author, dryRun = false } = options;
+  const { collabDir, author, dryRun = false, publish = true } = options;
   const dir = collabDir || findCollabDir(slug);
   if (!dir) throw new Error(`no collab directory: ${slug}`);
 
@@ -138,22 +138,30 @@ export async function render(slug, options = {}) {
 
   const events = readEvents(dir);
 
-  writeFileSync(join(dir, 'STATUS.md'), buildStatusMd(events, slug));
+  // Every render is recorded as this participant's artifact, so delivery can recognise it
+  // later in any state — a render is a generated file with no author inside it.
+  const put = (relPath, content) => {
+    writeFileSync(join(dir, relPath), content);
+    if (author) recordOwnedArtifact(dir, author, relPath, content);
+  };
+  put('STATUS.md', buildStatusMd(events, slug));
 
   const turnsDir = join(dir, 'turns');
   if (!existsSync(turnsDir)) mkdirSync(turnsDir);
   for (const e of events.filter(e => e.type === 'turn')) {
     const idSuffix = e.event_id.replace(/^evt-/, '');
-    writeFileSync(join(turnsDir, `${idSuffix}-${authorSlugFromTriplet(e.author)}.md`), buildTurnMd(e));
+    put(join('turns', `${idSuffix}-${authorSlugFromTriplet(e.author)}.md`), buildTurnMd(e));
   }
 
   renderEventsJsonl(dir);
+  if (author) recordOwnedArtifact(dir, author, 'events.jsonl', readFileSync(join(dir, 'events.jsonl')));
 
   const transport = options.transport || events.find(e => e.type === 'kickoff')?.payload?.transport || 'github:files';
-  if (!dryRun && author && isGitTransport(transport)) {
+  if (!dryRun && publish && author && isGitTransport(transport)) {
     const last = events[events.length - 1];
-    gitCommitPush(dir, transport, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`);
+    return deliverChannel(dir, transport, author, `[${author}] render: ${slug} ${last?.event_id ?? 'init'}`);
   }
+  return null;
 }
 
 export function main(argv) {

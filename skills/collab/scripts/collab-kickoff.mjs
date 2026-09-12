@@ -8,12 +8,12 @@
  *      [--ratification-window-minutes <n>] [--min-version <semver>]
  *      [--required-review <participant-triplet>]   (repeatable)
  */
-import { writeFileSync, mkdirSync, realpathSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   deriveSlug, appendEvent, renderEventsJsonl,
-  resolveIdentity, gitPullRebase, gitCommitPush, generatePin,
+  resolveIdentity, gitPullRebase, deliverChannel, recordOwnedArtifact, generatePin,
   assertSlugUnique, generateEventId, authorSlugFromTriplet,
   PLACEHOLDER_MEASURE_RE, validateMeasures,
 } from './collab-event-helpers.mjs';
@@ -130,7 +130,9 @@ export async function kickoff(message, options = {}) {
 
   const { collabDir, turnsDir } = resolveTransportPaths(transport, dirName);
   mkdirSync(turnsDir, { recursive: true });
-  writeFileSync(join(collabDir, 'KICKOFF.md'), buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet));
+  const kickoffMd = buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet);
+  writeFileSync(join(collabDir, 'KICKOFF.md'), kickoffMd);
+  recordOwnedArtifact(collabDir, triplet, 'KICKOFF.md', kickoffMd);
 
   const authorSlug = authorSlugFromTriplet(triplet);
   const kickoffEvtId = generateEventId(nowTs, authorSlug);
@@ -170,9 +172,10 @@ export async function kickoff(message, options = {}) {
   appendEvent(collabDir, joinEvt);
 
   renderEventsJsonl(collabDir);
+  recordOwnedArtifact(collabDir, triplet, 'events.jsonl', readFileSync(join(collabDir, 'events.jsonl')));
 
   if (!dryRun && isGitTransport(transport)) {
-    gitCommitPush(collabDir, transport, `[${triplet}] kickoff: ${slug} ${kickoffEvtId}`);
+    deliverChannel(collabDir, transport, triplet, `[${triplet}] kickoff: ${slug} ${kickoffEvtId}`);
   }
 
   return {

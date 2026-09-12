@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 const BASE = mkdtempSync(join(tmpdir(), 'collab-git-delivery-'));
 process.env.COLLAB_REPOS_ROOT = join(BASE, 'projects');
 process.env.COLLAB_STATE_ROOT = join(BASE, 'state');
+process.env.COLLAB_LOCAL_ROOT = join(BASE, 'local');            // the ownership manifest lives beside it, not in ~/.collab
 mkdirSync(process.env.COLLAB_REPOS_ROOT, { recursive: true });
 
 // Roots are read at import time in places, so import after the env is set.
@@ -233,6 +234,87 @@ test('git/delivery: an unrelated staged entry is not committed by the tick, and 
   assert.equal(ch.remoteCommits(), before + 1, 'the unrelated commit was pushed');
   assert.equal(git(ch.repo, 'log', '-1', '--format=%s', localHead), 'unrelated local work', 'the unrelated commit was not preserved');
   assert.ok(git(ch.repo, 'rev-list', '@{u}..HEAD').split('\n').filter(Boolean).length >= 1);
+});
+
+
+// ------------------------------------------------------------ ownership after commit, on the close routes, and at the closed exit (R3-H4 / R3-H5)
+
+const remoteShow = (slug, path) => { try { return git(BASE, '--git-dir', join(BASE, `${slug}-remote.git`), 'show', `main:${path}`); } catch { return null; } };
+
+test('git/delivery: a draft COMMITTED inside the channel but unpushed blocks the push and stays local — location is not ownership after commit (R3-H4)', async () => {
+  const slug = 'git-delivery-committed-draft';
+  const T0 = Date.now() - 12 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  request(ch); sync(ch, 'request');
+  await tick(slug);                                            // settles ME's bound and delivers it
+  const before = ch.remoteCommits();
+  writeFileSync(join(ch.dir, 'private-draft.txt'), 'committed by hand, never meant to travel\n');
+  git(ch.repo, 'add', join(ch.dir, 'private-draft.txt'));
+  git(ch.repo, 'commit', '-q', '-m', 'wip draft');
+  const r = await tick(slug);                                  // quiet tick
+  assert.ok(r.delivery.blocked, 'a committed draft under the channel was treated as deliverable');
+  assert.equal(r.delivery.blocked.reason, 'unrelated-unpushed-commits');
+  assert.equal(r.delivery.pushed, false);
+  assert.equal(ch.remoteCommits(), before, 'the draft commit was pushed');
+  assert.ok(!ch.remoteFiles().some(f => f.endsWith('private-draft.txt')));
+  assert.equal(git(ch.repo, 'log', '-1', '--format=%s'), 'wip draft', 'the local commit was not preserved');
+
+  // A committed hand edit to one of this participant's own events is not owned either:
+  // the plugin never rewrites an event, so the author inside a modified file proves nothing.
+  git(ch.repo, 'reset', '-q', '--hard', '@{u}');
+  const own = join(ch.dir, 'events', 'evt-002.json');
+  writeFileSync(own, readFileSync(own, 'utf8').replace('"own"', '"own (edited by hand)"'));
+  git(ch.repo, 'add', own); git(ch.repo, 'commit', '-q', '-m', 'edit history');
+  const r2 = await tick(slug);
+  assert.equal(r2.delivery.blocked?.reason, 'unrelated-unpushed-commits', 'a committed edit to an event was pushed as owned work');
+  assert.equal(ch.remoteCommits(), before);
+});
+
+test('git/delivery: the authority-boundary close delivers the close event and its renders, and nothing else in the channel (R3-H4)', async () => {
+  const slug = 'git-delivery-close-boundary';
+  const T0 = Date.now() - 40 * MIN;
+  const ch = mkGitChannel(slug, T0);
+  const pc = ch.add(ME, 'propose-close', 20, { synthesis: 's', igm_met: {} });   // R1's review of M-A never arrives
+  sync(ch, 'proposal');
+  const before = ch.remoteCommits();
+  writeFileSync(join(ch.dir, 'private-draft.txt'), 'still not for anyone\n');
+  const r = await tick(slug);
+  assert.equal(r.action, 'close');
+  assert.equal(r.reason, 'authority-boundary');
+  const close = readEvents(ch.dir).find(e => e.type === 'close');
+  const remote = ch.remoteFiles();
+  assert.ok(remote.some(f => f.endsWith(`events/${close.event_id}.json`)), 'the close never reached the remote');
+  assert.ok(remote.some(f => f.endsWith(`2026-09-11-${slug}/STATUS.md`)), 'the rendered STATUS.md never reached the remote');
+  assert.ok(remote.some(f => f.endsWith(`2026-09-11-${slug}/events.jsonl`)));
+  assert.ok(!remote.some(f => f.endsWith('private-draft.txt')), 'the close route published an unselected draft');
+  assert.equal(readFileSync(join(ch.dir, 'private-draft.txt'), 'utf8'), 'still not for anyone\n');
+  assert.equal(ch.remoteCommits(), before + 1);
+  assert.equal(r.delivery.verified, true);
+  assert.ok(r.delivery.foreign_paths.some(p => p.endsWith('private-draft.txt')));
+  assert.ok(pc, 'setup');
+});
+
+test('git/delivery: an owned close interrupted before OR after commit reaches the remote on the next tick, once, and the tick still exits closed (R3-H5)', async () => {
+  for (const [variant, commitFirst] of [['before-commit', false], ['after-commit', true]]) {
+    const slug = `git-delivery-close-retry-${variant}`;
+    const T0 = Date.now() - 20 * MIN;
+    const ch = mkGitChannel(slug, T0);
+    const before = ch.remoteCommits();
+    ch.add(ME, 'close', 15, { final_synthesis: 'x', outcome: 'failed-safely' });   // appended by an emit that died before publishing
+    if (commitFirst) { git(ch.repo, 'add', ch.dir); git(ch.repo, 'commit', '-q', '-m', 'close (push never happened)'); }
+    const r = await tick(slug);
+    assert.equal(r.action, 'exit', variant);
+    assert.equal(r.reason, 'closed', variant);
+    assert.equal(readEvents(ch.dir).filter(e => e.type === 'close').length, 1, `${variant}: a second close appeared`);
+    assert.ok(ch.remoteFiles().some(f => f.endsWith('events/evt-004.json')), `${variant}: the close never reached the remote`);
+    assert.equal(ch.remoteCommits(), before + 1, variant);
+    assert.equal(r.delivery.pushed, true, variant);
+    assert.equal(r.delivery.verified, true, variant);
+    assert.equal(remoteShow(slug, `collabs/2026-09-11-${slug}/events/evt-004.json`) !== null, true);
+    const again = await tick(slug);
+    assert.equal(again.action, 'exit');
+    assert.equal(ch.remoteCommits(), before + 1, `${variant}: a second tick published again`);
+  }
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));
