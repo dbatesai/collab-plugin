@@ -21,6 +21,41 @@ import {
   defaultTickIntervalMinutes, defaultRatificationWindowMinutes, preflightTransport,
 } from './transport.mjs';
 
+// A measure whose description is still the kickoff's inferred placeholder has no stated
+// completion condition and must not pass the declaration gate.
+export const PLACEHOLDER_MEASURE_RE = /^\(measure inferred/i;
+
+/**
+ * Validate a declared measure list. Returns error strings in the shared vocabulary
+ * (`completion-measure-placeholder: <id>`, `completion-measure-invalid: <id>`); empty when valid.
+ */
+export function validateMeasures(measures) {
+  const errors = [];
+  const seen = new Set();
+  for (const m of measures) {
+    const id = typeof m?.id === 'string' && m.id.trim() ? m.id : null;
+    const tag = id ?? '(missing id)';
+    if (!id || typeof m.requires_review_from !== 'string' || !m.requires_review_from.trim()
+        || typeof m.description !== 'string' || !m.description.trim()) {
+      errors.push(`completion-measure-invalid: ${tag}`);
+      continue;
+    }
+    if (PLACEHOLDER_MEASURE_RE.test(m.description.trim())) errors.push(`completion-measure-placeholder: ${id}`);
+    if (seen.has(id)) errors.push(`completion-measure-invalid: ${id}`);
+    seen.add(id);
+  }
+  return errors;
+}
+
+/** `--measure "<id>|<description>|<participant-triplet>"` → measure object; throws on malformed input. */
+export function parseMeasureFlag(value) {
+  const parts = String(value ?? '').split('|').map(s => s.trim());
+  if (parts.length !== 3 || parts.some(p => !p)) {
+    throw new Error('--measure needs "<id>|<description>|<participant-triplet>" with all three parts non-empty');
+  }
+  return { id: parts[0], description: parts[1], requires_review_from: parts[2] };
+}
+
 export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockHours = 24, tickIntervalMinutes, pin, opts = {}) {
   const payload = { message, igm, capabilities_wanted: capabilitiesWanted, wall_clock_hours: wallClockHours };
   if (typeof tickIntervalMinutes === 'number') payload.tick_interval_minutes = tickIntervalMinutes;
@@ -28,13 +63,21 @@ export function buildKickoffPayload(message, igm, capabilitiesWanted, wallClockH
   if (typeof opts.transport === 'string') payload.transport = opts.transport;
   if (typeof opts.ratificationWindowMinutes === 'number') payload.ratification_window_minutes = opts.ratificationWindowMinutes;
   if (typeof opts.minCollabPluginVersion === 'string') payload.min_collab_plugin_version = opts.minCollabPluginVersion;
-  if (Array.isArray(opts.requiredReviews) && opts.requiredReviews.length) {
-    payload.ratified_completion_measures = opts.requiredReviews.map(t => ({
-      id: `independent-review-${authorSlugFromTriplet(t)}`,
-      description: `independent review by ${t}`,
-      requires_review_from: t,
-    }));
+
+  const generated = (Array.isArray(opts.requiredReviews) ? opts.requiredReviews : []).map(t => ({
+    id: `independent-review-${authorSlugFromTriplet(t)}`,
+    description: `independent review by ${t}`,
+    requires_review_from: t,
+  }));
+  const measures = [...generated, ...(Array.isArray(opts.measures) ? opts.measures : [])];
+
+  // Writer gate: a non-solo session (capabilities wanted) must declare its contract.
+  if (capabilitiesWanted.length && measures.length === 0) {
+    throw new Error('completion-measures-required: a kickoff that wants other participants must declare at least one measure (--measure or --required-review)');
   }
+  const errors = validateMeasures(measures);
+  if (errors.length) throw new Error(errors.join('; '));
+  if (measures.length) payload.ratified_completion_measures = measures;
   return payload;
 }
 
@@ -72,6 +115,7 @@ export async function kickoff(message, options = {}) {
     ratificationWindowMinutes,
     minCollabPluginVersion = '0.2.0',
     requiredReviews = [],
+    measures = [],
   } = options;
 
   if (!parseTransport(transport)) throw new Error(`invalid transport: ${transport}`);
@@ -125,6 +169,7 @@ export async function kickoff(message, options = {}) {
       ratificationWindowMinutes: ratMin,
       minCollabPluginVersion,
       requiredReviews,
+      measures,
     }),
   };
   appendEvent(collabDir, kickoffEvt);
@@ -163,8 +208,13 @@ export function main(argv) {
   let message = null, workspaceId = null, dryRun = false;
   let tickIntervalMinutes, pin, transport, ratificationWindowMinutes, minCollabPluginVersion;
   const requiredReviews = [];
+  const measures = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--workspace-id') workspaceId = argv[++i];
+    else if (argv[i] === '--measure') {
+      try { measures.push(parseMeasureFlag(argv[++i])); }
+      catch (e) { process.stderr.write(`${e.message}\n`); return 2; }
+    }
     else if (argv[i] === '--dry-run') dryRun = true;
     else if (argv[i] === '--transport') transport = argv[++i];
     else if (argv[i] === '--tick-interval-minutes') {
@@ -213,7 +263,7 @@ export function main(argv) {
   }
   kickoff(message, {
     workspaceId, dryRun, tickIntervalMinutes, pin,
-    transport, ratificationWindowMinutes, minCollabPluginVersion, requiredReviews,
+    transport, ratificationWindowMinutes, minCollabPluginVersion, requiredReviews, measures,
   })
     .then(r => {
       process.stdout.write(

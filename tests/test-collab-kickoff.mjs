@@ -101,6 +101,81 @@ test('buildKickoffPayload includes transport, ratification_window_minutes, min_c
   assert.equal(payload.min_collab_plugin_version, '0.2.0');
 });
 
+// ---------------------------------------------------------------- eligibility v1: writer gate
+//
+// The plugin guarantees what its writer emits: a kickoff it creates for a non-solo session
+// declares valid completion measures. `capabilities_wanted` non-empty is the non-solo signal.
+// Each refusal test is paired with the same payload minus the defect, so a gate that refuses
+// everything cannot pass.
+
+const IGM = { intention: 'i', goal: 'g', measure: 'three independent accepts' };
+const R1 = 'core-codex@codex:host';
+const validMeasure = { id: 'M-A', description: 'adapter conforms to the shared spec', requires_review_from: R1 };
+
+test('writer gate: a non-solo kickoff without measures is refused (completion-measures-required)', () => {
+  assert.throws(
+    () => buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, {}),
+    /completion-measures-required/,
+  );
+  // control: the same kickoff with one valid measure is accepted
+  const p = buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, { measures: [validMeasure] });
+  assert.deepEqual(p.ratified_completion_measures, [validMeasure]);
+});
+
+test('writer gate: a solo kickoff (no capabilities wanted) needs no measures', () => {
+  const p = buildKickoffPayload('msg', IGM, [], 24, 5, undefined, {});
+  assert.equal(p.ratified_completion_measures, undefined);
+});
+
+test('writer gate: a placeholder description is refused by id (completion-measure-placeholder)', () => {
+  const placeholder = { ...validMeasure, description: "(measure inferred as 'reasonable consensus on goal'; refine in first turn)" };
+  assert.throws(
+    () => buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, { measures: [placeholder] }),
+    /completion-measure-placeholder: M-A/,
+  );
+  assert.throws(
+    () => buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, { measures: [{ ...validMeasure, description: '' }] }),
+    /completion-measure-invalid: M-A/,
+  );
+});
+
+test('writer gate: duplicate ids and missing reviewer are refused by id (completion-measure-invalid)', () => {
+  assert.throws(
+    () => buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, { measures: [validMeasure, { ...validMeasure, description: 'second' }] }),
+    /completion-measure-invalid: M-A/,
+  );
+  assert.throws(
+    () => buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, { measures: [{ id: 'M-B', description: 'x' }] }),
+    /completion-measure-invalid: M-B/,
+  );
+});
+
+test('writer gate: --required-review still generates a full measure and merges with --measure', () => {
+  const p = buildKickoffPayload('msg', IGM, ['review'], 24, 5, undefined, {
+    requiredReviews: ['core-gemini@antigravity:host'],
+    measures: [validMeasure],
+  });
+  const ids = p.ratified_completion_measures.map(m => m.id);
+  assert.deepEqual(ids, ['independent-review-core-gemini', 'M-A']);
+  for (const m of p.ratified_completion_measures) {
+    assert.ok(m.description && m.requires_review_from, `generated measure incomplete: ${JSON.stringify(m)}`);
+  }
+});
+
+let parseMeasureFlag;
+try { ({ parseMeasureFlag } = await import('../skills/collab/scripts/collab-kickoff.mjs')); }
+catch { parseMeasureFlag = undefined; }
+
+test('writer gate: --measure "<id>|<description>|<triplet>" parses, and malformed values are refused', () => {
+  assert.equal(typeof parseMeasureFlag, 'function', 'parseMeasureFlag is not exported');
+  assert.deepEqual(
+    parseMeasureFlag('M-A|adapter conforms|core-codex@codex:host'),
+    { id: 'M-A', description: 'adapter conforms', requires_review_from: 'core-codex@codex:host' },
+  );
+  assert.throws(() => parseMeasureFlag('M-A|only two parts'), /--measure/);
+  assert.throws(() => parseMeasureFlag('|desc|core-codex@codex:host'), /--measure/);
+});
+
 test('kickoff rejects when slug already exists in any transport', async () => {
   const { LOCAL_COLLABS_ROOT } = await import('../skills/collab/scripts/transport.mjs');
   const { appendEvent } = await import('../skills/collab/scripts/collab-event-helpers.mjs');
