@@ -231,3 +231,19 @@ test('recovery: a close re-appended after an interruption is idempotent; a confl
     assert.equal(readEvents(dir).find(e => e.type === 'close').event_id, 'evt-close');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('gate/retry: a byte-identical re-append of a scoped verdict is idempotent; changed bytes under the same id conflict; a fresh id is verdict-duplicate (R3-H2)', () => {
+  const dir = mkCollabDir();
+  try {
+    mkLedger(dir);
+    const V = verdict('evt-002', R1, { measures: ['M-A'] });
+    assert.equal(appendEvent(dir, V).written, true);
+    assert.deepEqual(appendEvent(dir, V), { written: false, idempotent: true }, 'the retry after an interrupted publish must reach the idempotent path, not the duplicate gate');
+    assert.throws(() => appendEvent(dir, { ...V, payload: { measures: ['M-A'], agreement_notes: 'changed' } }), /event id conflict/);
+    assert.throws(() => appendEvent(dir, verdict('evt-003', R1, { measures: ['M-A'] })), /verdict-duplicate/);
+    const files = readdirSync(join(dir, 'events')).filter(f => !f.startsWith('.tmp-')).sort();
+    assert.deepEqual(files, ['evt-001.json', 'evt-002.json']);
+    assert.equal(readFileSync(join(dir, 'events', 'evt-002.json'), 'utf8'), JSON.stringify(V, null, 2), 'the original bytes were touched');
+    assert.equal(HELPERS.measureVerdicts(readEvents(dir)).get('M-A').ratified.length, 1);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

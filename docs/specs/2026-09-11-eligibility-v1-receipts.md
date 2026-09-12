@@ -90,6 +90,17 @@ Hale reviewed the snapshot at `f5e0e04` and found two material defects. Both wer
 | M12 a non-solo kickoff needs no measures | 1 (kickoff) |
 | M13 silence credits a measure | 1 (class 18) |
 
+## Round 3, second pass — Hale's candidate review of `d3c4ea4` (`hale-to-muse-candidate-recovery-review-2026-09-11-dd65a67.md`)
+
+Four findings, all reproduced from his descriptions, all fixed tests-first. Red run: the five test additions on `d3c4ea4` → 5 fail / 39 in the four touched files; green after the fix.
+
+- **R3-H1 (still open → fixed).** The scanner ran only on `turn-or-propose`, so a due fallback was skipped while a proposal was on the table. Now obligations run on both decision routes; the precedence (closed → contract-invalid → safety nets → close routes → decision routes) is stated in SKILL.md. Test: `tick/deadline: a pending proposal does not skip a due fallback…` (R1 ticks on `ratify-or-object`, one fallback executed; just-before-deadline control, zero).
+- **R3-H2 — identical retry threw `verdict-duplicate`.** The write-time duplicate check now ignores the credit whose event id is the event being written, so a byte-identical retry reaches the idempotent path; changed bytes under the same id still conflict; a fresh id is still refused. Test: `gate/retry: a byte-identical re-append…` (original bytes untouched, one credit).
+- **R3-H3 — timeout records never left the machine.** The tick committed chases and nothing else. Now one delivery step at the end publishes everything the tick wrote plus anything `git status` shows pending under the channel from an interrupted tick; nothing pending, no commit. New `gitPendingPaths` helper. Tests in `tests/test-collab-git-delivery.mjs` against a real clone tracking a real bare remote: timeout-only tick → committed, pushed, remote has the file, next tick adds no commit; an orphaned record from an interrupted tick → published by the next tick, not re-executed, only `collabs/` paths in the commit.
+- **R3-M1 (still open → fixed).** Legacy bare verdicts were in the delivery map. Only `scope: 'scoped'` credits deliver a request now; the legacy credit itself is unchanged. Test: `disposition: a legacy bare verdict after a propose-close is measure credit, and still delivers no request`.
+
+Hale's four bounded yes answers to the judgment calls are recorded as given: refusal-plus-repair, not automatic recovery, for `contract-invalid`; wall-clock stays `aborted-budget`; the sanitized fixture is accepted as method, not as verified equivalence; the requester executing its own bound grants no reassignment authority and a local record is not proof of downstream delivery.
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

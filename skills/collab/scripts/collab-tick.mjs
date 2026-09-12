@@ -21,7 +21,7 @@ import {
   getJoinedAgents, computeCloseOutcome, validateMeasures,
   openRequests, waitCycles, evaluateObligations, executeTimeoutAction, isSystemTurn,
   OBLIGATION_GRACE_MS,
-  gitPullRebase, gitCommitPush,
+  gitPullRebase, gitCommitPush, gitPendingPaths,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
 } from './collab-event-helpers.mjs';
@@ -199,9 +199,13 @@ export async function tickDeterministic(slug, options = {}) {
   // v1.0 #6: deterministic chase emission before handing off to LLM.
   // Check per-participant obligations; emit chase events for missed + grace-elapsed
   // participants. Flood-limited to 3 chase events per participant per 60 minutes.
+  // Obligations run on every decision route. Precedence above this point: closed, then
+  // contract-invalid, then the safety nets, then the close routes (authority boundary,
+  // emit-close) — each returns before this. A pending proposal is a decision route, not a
+  // close, so a due fallback is taken while it is on the table.
   const chaseEvents = [];
   const timeoutActions = [];
-  if (route === 'turn-or-propose') {
+  if (route === 'turn-or-propose' || route === 'ratify-or-object') {
     const joined = new Set(getJoinedAgents(events));
     const nowDate = new Date(nowTs);
     const { due } = evaluateObligations(events, { now: nowTs, self: triplet });
@@ -251,12 +255,7 @@ export async function tickDeterministic(slug, options = {}) {
       };
       chaseEvents.push(chaseEv);
     }
-    if (!dryRun && chaseEvents.length > 0) {
-      for (const ev of chaseEvents) appendEvent(dir, ev);
-      if (isGitTransport(transport)) {
-        gitCommitPush(dir, transport, `[${triplet}] chase: ${chaseEvents.length} obligation(s) missed ${slug}`);
-      }
-    }
+    if (!dryRun) for (const ev of chaseEvents) appendEvent(dir, ev);
     // The bound: the first tick at or after a deadline executes its fallback, once. The
     // ticking participant's own deadline is included — an absent counterpart is the case.
     if (!dryRun) for (const item of timeoutActions) executeTimeoutAction(dir, item, triplet);
@@ -285,14 +284,31 @@ export async function tickDeterministic(slug, options = {}) {
         },
       });
     }
-    if (isGitTransport(transport)) gitCommitPush(dir, transport, `[${triplet}] wait-cycle: ${newCycles.length} pair(s) ${slug}`);
+  }
+
+  // Delivery. One publish for everything this tick wrote — chases, timeout records, wait-cycle
+  // notices — plus anything an interrupted tick left in the working copy: a record on disk
+  // that never reached the branch is not delivered, and the next tick owes it. A tick with
+  // nothing pending commits nothing.
+  let published = [];
+  if (!dryRun && isGitTransport(transport)) {
+    published = gitPendingPaths(dir, transport);
+    if (published.length) {
+      const parts = [];
+      if (chaseEvents.length) parts.push(`${chaseEvents.length} chase`);
+      if (timeoutActions.length) parts.push(`${timeoutActions.length} timeout-action`);
+      if (newCycles.length) parts.push(`${newCycles.length} wait-cycle`);
+      const carried = published.length - chaseEvents.length - timeoutActions.length - newCycles.length;
+      if (carried > 0) parts.push(`${carried} pending record(s) from an earlier tick`);
+      gitCommitPush(dir, transport, `[${triplet}] tick: ${parts.join(', ') || 'publish pending'} ${slug}`);
+    }
   }
 
   // LLM-decision routes: return a hint, let the agent take over
   return {
     action: 'agent-decision-needed', route, triplet, slug,
     chase_events_emitted: chaseEvents.length, timeout_actions_executed: dryRun ? 0 : timeoutActions.length,
-    open_requests, wait_cycles,
+    published_paths: published.length, open_requests, wait_cycles,
   };
 }
 

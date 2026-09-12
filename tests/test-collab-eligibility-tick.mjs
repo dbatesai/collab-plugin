@@ -299,3 +299,30 @@ test('tick/requests: a refused verdict that references a request does not delive
     assert.deepEqual(r.open_requests.map(x => [x.request_id, x.state]), [[req.event_id, 'requested']]);
   } finally { cleanup(slug); }
 });
+
+// ------------------------------------------------------------------ obligations on every decision route (R3-H1)
+
+test('tick/deadline: a pending proposal does not skip a due fallback — the ratify-or-object route executes it; just before the deadline it does not', async () => {
+  const slug = 'elig-tick-fallback-during-proposal';
+  const T0 = Date.now() - 12 * MIN;
+  const { dir, add } = mkChannel(slug, T0, { joins: [R1] });
+  try {
+    add(ME, 'turn', 5, turn(R1, R1, { body: 'please review', next_update_by: iso(T0 + 10 * MIN), on_timeout: 'proceed-alone' }));   // lapsed 2 min ago
+    add(ME, 'propose-close', 11, { synthesis: 's', igm_met: {} });
+    const r = await tickDeterministic(slug, { workspaceId: 'test', triplet: R1, dryRun: false });   // R1 is pending on the proposal
+    assert.equal(r.action, 'agent-decision-needed');
+    assert.equal(r.route, 'ratify-or-object');
+    assert.equal(r.timeout_actions_executed, 1, 'a due fallback was skipped because a proposal was active');
+    assert.equal(readEvents(dir).filter(e => e.type === 'timeout-action' && e.payload.participant === ME).length, 1);
+  } finally { cleanup(slug); }
+  const slug2 = 'elig-tick-fallback-during-proposal-early';
+  const T1 = Date.now() - 8 * MIN;
+  const { add: add2 } = mkChannel(slug2, T1, { joins: [R1] });
+  try {
+    add2(ME, 'turn', 5, turn(R1, R1, { body: 'please review', next_update_by: iso(T1 + 10 * MIN), on_timeout: 'proceed-alone' }));   // 2 min ahead
+    add2(ME, 'propose-close', 6, { synthesis: 's', igm_met: {} });
+    const r = await tickDeterministic(slug2, { workspaceId: 'test', triplet: R1, dryRun: false });
+    assert.equal(r.route, 'ratify-or-object');
+    assert.equal(r.timeout_actions_executed, 0, 'a fallback executed before its deadline');
+  } finally { cleanup(slug2); }
+});

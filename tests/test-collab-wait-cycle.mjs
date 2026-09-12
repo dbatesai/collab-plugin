@@ -156,3 +156,15 @@ test('cycle: A→B and B→A open requests form one pair with a stable key; acce
   add(B, 'turn', 14, turn({ signals: ['delivered'] }), [rA.event_id]);
   assert.equal(waitCycles(events).length, 0, 'a delivered request dissolves the pair');
 });
+
+test('disposition: a legacy bare verdict after a propose-close is measure credit, and still delivers no request (R3-M1)', () => {
+  const { events, add } = ledger();
+  const req = request(add);
+  add(A, 'propose-close', 12, { synthesis: 's', igm_met: {} });
+  add(B, 'ratify', 15, {}, [req.event_id]);                 // bare: legacy-shaped
+  const v = H.measureVerdicts(events);
+  assert.equal(v.get('M-B').ratified[0]?.scope, 'legacy', 'the legacy credit itself must survive');
+  const open = openRequests(events, B);
+  assert.equal(open.length, 1, 'a legacy credit delivered a request; only scoped evidence may');
+  assert.equal(open[0].state, 'requested');
+});

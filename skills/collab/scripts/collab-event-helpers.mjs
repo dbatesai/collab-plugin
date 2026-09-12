@@ -311,12 +311,16 @@ function writerGateError(collabDir, event) {
   if (!Array.isArray(ids) || ids.length === 0) {
     return `verdict-unscoped: ${event.author} owes ${owed.join(', ')}; a verdict from a named reviewer must list the measures it discharges`;
   }
-  // A measure this reviewer has already judged on the ledger as read now. Two writers that
-  // both read before either wrote can still both land; the reader credits the first only.
+  // A measure this reviewer has already judged on the ledger as read now. The judgment that
+  // is this very event (same id — a retry after an interrupted publish) is not a duplicate;
+  // the byte-identical check below decides that. Two writers that both read before either
+  // wrote can still both land; the reader credits the first only.
   const verdicts = measureVerdicts(ledger);
   for (const id of ids) {
     const v = verdicts.get(id);
-    if (v && [...v.ratified, ...v.objected].some(c => c.by === event.author)) return `verdict-duplicate: ${event.author} ${id}`;
+    if (v && [...v.ratified, ...v.objected].some(c => c.by === event.author && c.event_id !== event.event_id)) {
+      return `verdict-duplicate: ${event.author} ${id}`;
+    }
   }
   return null;
 }
@@ -902,17 +906,21 @@ const REQUEST_SIGNALS = ['accepted', 'declined', 'delivered'];
 /**
  * Open requests on `participant`, oldest first. `includeClosed` returns the whole lifecycle.
  *
- * Delivery by verdict reuses accepted-credit semantics: only a verdict the reader credits
- * (see `measureVerdicts`) can discharge a request, and only if it judges what the request
- * asked for — a request may name the measures it is about in `measures`; one that names
- * none is delivered by any credited verdict that references it.
+ * Delivery by verdict reuses accepted-credit semantics: only a SCOPED verdict the reader
+ * credits (see `measureVerdicts`) can discharge a request, and only if it judges what the
+ * request asked for — a request may name the measures it is about in `measures`; one that
+ * names none is delivered by any credited scoped verdict that references it. A legacy bare
+ * verdict is measure credit under the replay rule and delivers nothing: it never said what
+ * it judged, so it cannot be an answer to a request.
  */
 export function openRequests(events, participant, { includeClosed = false } = {}) {
   const out = [];
-  // event_id → the measure ids that event was credited for
+  // event_id → the measure ids that event was credited for, scoped credits only
   const credited = new Map();
   for (const v of measureVerdicts(events).values()) {
-    for (const c of [...v.ratified, ...v.objected]) credited.set(c.event_id, [...(credited.get(c.event_id) || []), v.measure.id]);
+    for (const c of [...v.ratified, ...v.objected]) {
+      if (c.scope === 'scoped') credited.set(c.event_id, [...(credited.get(c.event_id) || []), v.measure.id]);
+    }
   }
   for (const e of events) {
     if (e.type !== 'turn' || isChase(e) || e.author === participant) continue;
@@ -1223,6 +1231,15 @@ function runGit(repo, args, { allowFail = false } = {}) {
     throw err;
   }
   return { ok, stdout: r.stdout || '', stderr: r.stderr || '' };
+}
+
+/**
+ * Paths under `collabDir` that the working copy holds but the branch does not — records an
+ * interrupted tick appended and never published. A local file is not remote delivery.
+ */
+export function gitPendingPaths(collabDir, transport) {
+  const repo = repoForTransport(transport);
+  return runGit(repo, ['status', '--porcelain', '--', collabDir]).stdout.split('\n').filter(Boolean).map(l => l.slice(3));
 }
 
 export function gitCommitPush(collabDir, transport, commitMsg, owner = `pid-${process.pid}`) {
