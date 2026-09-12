@@ -60,18 +60,20 @@ test('replay/july-31: no contract was ever declared, so the new reader computes 
 test('replay/july-31: what the new reader would have done differently — chased, and shown the wait', () => {
   // The old reader saw no obligations: no turn declared a deadline, so nobody was ever
   // chased, and the session sat 46 minutes before the stall net closed it. The new reader
-  // gives every turn a deadline one cadence out, so at the close instant every other
-  // participant's last turn is overdue and the first response is a chase.
+  // gives every turn a deadline one cadence out, so at the close instant every last turn
+  // is overdue: each participant's default fallback (proceed-alone) is due, the other
+  // participants are also due a reminder, and nothing is flagged as an unbounded wait.
   const expected = JSON.parse(readFileSync(join(FIX, 'expected-3b97ac6.json'), 'utf8'));
   assert.deepEqual(expected.obligations_due_at_close, [], 'fixture drift: 3b97ac6 saw obligations here');
   const events = readEvents(FIX);
   const close = events.find(e => e.type === 'close');
   const before = events.filter(e => e !== close);
   const obl = evaluateObligations(before, { now: close.ts, self: close.author });
-  const others = [...new Set(before.filter(e => e.type === 'turn' && e.author !== close.author).map(e => e.author))];
-  assert.deepEqual(obl.due.map(d => d.participant).sort(), others.sort());
-  assert.ok(obl.due.every(d => d.action === 'chase'));
-  assert.deepEqual(obl.invalid, []);
+  const authors = [...new Set(before.filter(e => e.type === 'turn').map(e => e.author))];
+  const others = authors.filter(a => a !== close.author);
+  assert.deepEqual(obl.due.filter(d => d.action !== 'chase').map(d => [d.participant, d.action]).sort(), authors.map(a => [a, 'proceed-alone']).sort());
+  assert.deepEqual(obl.due.filter(d => d.action === 'chase').map(d => d.participant).sort(), others.sort());
+  assert.deepEqual(obl.invalid, [], 'the old reader flagged one turn as an unbounded wait; the default on_timeout removes that');
   // Those turns named `waiting_on` only as v0 prose; none carried the field, so no request is
   // visible and no cycle is reported — the reader invents nothing the writer did not say.
   assert.deepEqual(others.flatMap(a => openRequests(before, a)), []);

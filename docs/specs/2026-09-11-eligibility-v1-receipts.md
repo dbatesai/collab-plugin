@@ -58,6 +58,38 @@ Two existing tests encoded behavior the signed spec replaces. Both were changed 
 - **The wait-cycle system turn** carries `waiting_on: null`, `signals: ['wait-cycle', <a>, <b>]`, and `wait_cycle: { key, participants, requests }`; `isSystemTurn` treats it like a chase (commits nobody, requests nothing, is not progress).
 - **The receipt's `ratified_by`** is `explicitRatified` from the ratification status, as the 1.1.0 authority-boundary close already did; silence never appears there.
 
+## Round 3 — Hale's plan-checkpoint findings (`hale-to-muse-round-3-plan-review-2026-09-11-0f0c2ae.md`)
+
+Hale reviewed the snapshot at `f5e0e04` and found two material defects. Both were real; both are fixed in the commit after `7ce77ef`, tests first.
+
+**R3-H1 — the fallback was gated on the chase ladder.** The settled text is *"the first authorized check at or after the deadline takes the declared fallback."* The code (inherited from the 1.1.0 obligation scanner) executed the fallback only after three chases, so a participant an hour offline still only got a chase. Now: `evaluateObligations` returns the fallback entry at the first check where `now ≥ deadline`, once per deadline (a `timeout-action` with that `for_deadline` settles it), for *every* author's latest substantive turn — the ticking participant's own included, because an absent counterpart is the case the bound exists for. Chases are reminders: they start after the 5-minute grace, stop at the flood limit, are counted per participant, and no longer gate anything. The tick's chase loop was replaced by the scanner's output (one source of truth) plus the existing 60-minute flood window. Tests: helper (`test-collab-obligations.mjs` 12 ×3 rewritten, `test-collab-default-deadline.mjs` ×2 new/rewritten: just-before-deadline, at-deadline, an hour late, retry/no-duplicate) and route (`test-collab-eligibility-tick.mjs` `tick/deadline` ×3: default, explicit-an-hour-late, own bound).
+
+**R3-M1 — a refused verdict delivered a request.** `openRequests` marked a request delivered on any scoped verdict referencing it. Now delivery reuses accepted-credit semantics exactly: a verdict discharges a request only if `measureVerdicts` credited that event, and — when the request names what it is about (`measures` on the turn, the explicit request-to-measure link) — only if the credited ids intersect it. Tests: unknown id, wrong reviewer, duplicate overlap, bare verdict, no verdict, valid-but-unrelated, valid matching, request with no named measure (`test-collab-wait-cycle.mjs` `disposition` ×2); and through the tick (`test-collab-eligibility-tick.mjs` `tick/requests: a refused verdict…`). Render and status call the same helper.
+
+**Acceptance-map additions (Hale item 3):** malformed measure field types refused before any file (`gate: malformed measure field types…`); same-id retry vs conflicting payload → existing classes 5 and 8; interruption around close then retry, conflicting close under the same id, a second close under a fresh id (`recovery: a close re-appended…` — the first close is the terminal record every reader reports; closes are distributed by design, so the second is recorded, not refused); two writers overlapping a verdict (`gate: a second verdict on a measure the ledger already shows judged…` — refused at write when the ledger already shows the judgment; two writers that both read before either wrote can both land, and the reader credits the first only — the deferred stale-context limitation, unchanged).
+
+**Red run for the Round 3 tests**, five files copied unchanged onto `7ce77ef` before the fix: 12 fail / 52 (`test-collab-obligations.mjs` 2, `test-collab-default-deadline.mjs` 3, `test-collab-eligibility-tick.mjs` 4, `test-collab-wait-cycle.mjs` 2, `test-collab-append-noclobber.mjs` 1). The malformed-types and close-retry tests pass at `7ce77ef`: they map existing guarantees, as Hale asked. Green after the fix: 432 / 432.
+
+**Test-side consequences of the new timing** (fixtures, not semantics): two tick fixtures gained explicit deadlines so their bounds do not lapse inside the test window; the obligations test's `chase()` helper now names the chased participant in `signals`, as the real emitter always did (chases are counted per participant); the July 31 "what the new reader would have done" assertion now expects a fallback per author plus a reminder per other participant.
+
+**Mutation controls (Hale's method correction).** `tests/tools/run-mutations.mjs` applies thirteen targeted mutations, one guarantee each, and requires every one to be caught by the named test files. Run on the candidate: every mutation caught.
+
+| Mutation | Caught by |
+|---|---|
+| M1 legacy verdict credited before the propose-close | 2 (eligibility, replay) |
+| M2 an objection no longer blocks the close outcome | 4 (eligibility ×2, tick ×2) |
+| M3 a scoped verdict with a bad id gets partial credit | 1 (disposition) |
+| M4 a missing deadline is no deadline | 4 (default-deadline ×3, chase) |
+| M5 the fallback waits for the chase sequence again (R3-H1) | 8 (obligations, default-deadline, tick) |
+| M6 any referencing verdict delivers a request (R3-M1) | 3 (disposition ×2, tick) |
+| M7 the writer gate is skipped | 4 (append-noclobber) |
+| M8 contract-invalid never fires | 1 (tick) |
+| M9 the stall net ignores the contract | 3 (tick) |
+| M10 the validator misses verdict-duplicate | 2 (validate) |
+| M11 STATUS.md drops the Measures table | 2 (render) |
+| M12 a non-solo kickoff needs no measures | 1 (kickoff) |
+| M13 silence credits a measure | 1 (class 18) |
+
 ## Out of scope, recorded
 
 Stale-context detection between read and append (the reread convention is documented with its race); participant identity; transport defaults; never-closed sessions; wall-clock extension.

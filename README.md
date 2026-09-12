@@ -231,7 +231,7 @@ igm:
 7. Otherwise the proposer's tick closes by the contract: any measure objected to → `failed-safely`; any measure ratified → `complete-to-authority-boundary`; nothing judged → `failed-safely`. The close carries a receipt (`ratified_measures`, `objected_measures`, `unmet_ratified_measures`, `missing_reviews_from`, `ratified_by`, `note`). There is no outcome that waives a ratified measure by calling the result degraded.
 8. All agents see `close` on next tick; cancel their own `/loop`; exit.
 
-Every `turn` names `waiting_on`; the recipient sees it as an open request (tick result `open_requests`, `STATUS.md` **Waiting** table) until they reference it with an `accepted`, `declined`, or `delivered` signal, answer it with a scoped verdict, or the requester's timeout fallback lapses it. A turn with no `next_update_by` is due one tick cadence after its timestamp; an absent `on_timeout` means `proceed-alone`.
+Every `turn` names `waiting_on`; the recipient sees it as an open request (tick result `open_requests`, `STATUS.md` **Waiting** table) until they reference it with an `accepted`, `declined`, or `delivered` signal, answer it with a verdict the reader credits (optionally on the measures the request named in `measures`), or the requester's timeout fallback lapses it. A turn with no `next_update_by` is due one tick cadence after its timestamp; an absent `on_timeout` means `proceed-alone`; the first tick at or after the deadline executes the fallback once, and chases are reminders that never gate it.
 
 Any `object` event invalidates the `propose-close`. The collab continues; anyone can propose-close again later. No retry cap — the objection-deadlock safety net (3 cycles) bounds it.
 

@@ -304,11 +304,21 @@ function writerGateError(collabDir, event) {
     return null;
   }
   if (event.type !== 'ratify' && event.type !== 'object') return null;
-  const owed = declaredMeasures(readEvents(collabDir)).filter(m => m.requires_review_from === event.author).map(m => m.id);
+  const ledger = readEvents(collabDir);
+  const owed = declaredMeasures(ledger).filter(m => m.requires_review_from === event.author).map(m => m.id);
   if (owed.length === 0) return null;
   const ids = event.payload?.measures;
-  if (Array.isArray(ids) && ids.length > 0) return null;
-  return `verdict-unscoped: ${event.author} owes ${owed.join(', ')}; a verdict from a named reviewer must list the measures it discharges`;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return `verdict-unscoped: ${event.author} owes ${owed.join(', ')}; a verdict from a named reviewer must list the measures it discharges`;
+  }
+  // A measure this reviewer has already judged on the ledger as read now. Two writers that
+  // both read before either wrote can still both land; the reader credits the first only.
+  const verdicts = measureVerdicts(ledger);
+  for (const id of ids) {
+    const v = verdicts.get(id);
+    if (v && [...v.ratified, ...v.objected].some(c => c.by === event.author)) return `verdict-duplicate: ${event.author} ${id}`;
+  }
+  return null;
 }
 
 export function appendEvent(collabDir, event) {
@@ -569,6 +579,12 @@ export function effectiveOnTimeout(turn) {
 /**
  * What is owed right now. Pure: takes events, returns findings. The scanner decides, not
  * in-the-moment judgment, because an agent deep in a long session will just keep waiting.
+ *
+ * The bound and the reminder are separate things. The first check at or after a deadline
+ * takes the declared fallback (once per deadline, by whoever checks — the author's own tick
+ * included, since an absent counterpart is the case the bound exists for). Chases are
+ * reminders to someone else: they start after grace, stop at the flood limit, and never
+ * move the bound in either direction.
  */
 export function evaluateObligations(events, { now, self }) {
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
@@ -578,7 +594,7 @@ export function evaluateObligations(events, { now, self }) {
   // deadline, declared or defaulted. Chases and other system bookkeeping commit nobody.
   const latestPerAuthor = new Map();
   for (const e of events) {
-    if (e.type !== 'turn' || e.author === self || isChase(e)) continue;
+    if (e.type !== 'turn' || isChase(e)) continue;
     latestPerAuthor.set(e.author, e);
   }
 
@@ -596,17 +612,16 @@ export function evaluateObligations(events, { now, self }) {
       });
       continue;
     }
-    if (nowMs - Date.parse(dl) < OBLIGATION_GRACE_MS) continue;
+    const dlMs = Date.parse(dl);
+    if (nowMs < dlMs) continue;
 
-    // Already discharged? Do not re-fire policy forever.
+    const chases = events.filter(x => isChase(x) && (x.payload?.signals || []).includes(participant) && Date.parse(x.ts) > dlMs).length;
     const settled = events.some(x => x.type === 'timeout-action' && x.payload?.participant === participant
-      && Date.parse(x.payload?.for_deadline || 0) === Date.parse(dl));
-    if (settled) continue;
-
-    const chases = events.filter(x => isChase(x) && Date.parse(x.ts) > Date.parse(dl)).length;
-    due.push(chases < CHASE_FLOOD_LIMIT
-      ? { participant, action: 'chase', for_deadline: dl, chases_so_far: chases }
-      : { participant, action, for_deadline: dl, chases_so_far: chases });
+      && Date.parse(x.payload?.for_deadline || 0) === dlMs);
+    if (!settled) due.push({ participant, action, for_deadline: dl, chases_so_far: chases });
+    if (participant !== self && nowMs - dlMs >= OBLIGATION_GRACE_MS && chases < CHASE_FLOOD_LIMIT) {
+      due.push({ participant, action: 'chase', for_deadline: dl, chases_so_far: chases });
+    }
   }
 
   // Zero-progress escalation: a window containing only bookkeeping means the collaboration
@@ -884,17 +899,30 @@ export function computeCloseOutcome(events, nowTs, { route } = {}) {
 
 const REQUEST_SIGNALS = ['accepted', 'declined', 'delivered'];
 
-/** Open requests on `participant`, oldest first. `includeClosed` returns the whole lifecycle. */
+/**
+ * Open requests on `participant`, oldest first. `includeClosed` returns the whole lifecycle.
+ *
+ * Delivery by verdict reuses accepted-credit semantics: only a verdict the reader credits
+ * (see `measureVerdicts`) can discharge a request, and only if it judges what the request
+ * asked for — a request may name the measures it is about in `measures`; one that names
+ * none is delivered by any credited verdict that references it.
+ */
 export function openRequests(events, participant, { includeClosed = false } = {}) {
   const out = [];
+  // event_id → the measure ids that event was credited for
+  const credited = new Map();
+  for (const v of measureVerdicts(events).values()) {
+    for (const c of [...v.ratified, ...v.objected]) credited.set(c.event_id, [...(credited.get(c.event_id) || []), v.measure.id]);
+  }
   for (const e of events) {
     if (e.type !== 'turn' || isChase(e) || e.author === participant) continue;
     const to = e.payload?.waiting_on;
     const names = Array.isArray(to) ? to.includes(participant) : to === participant;
     if (!names) continue;
+    const about = Array.isArray(e.payload?.measures) ? e.payload.measures : [];
     const req = {
       request_id: e.event_id, from: e.author, to: participant, ts: e.ts,
-      body: e.payload?.body || '', deadline: effectiveDeadline(e, events),
+      body: e.payload?.body || '', measures: about, deadline: effectiveDeadline(e, events),
       on_timeout: effectiveOnTimeout(e) || 'proceed-alone', state: 'requested',
     };
     for (const x of events) {
@@ -902,7 +930,11 @@ export function openRequests(events, participant, { includeClosed = false } = {}
       if (x.type === 'timeout-action' && x.payload?.participant === e.author
           && Date.parse(x.payload?.for_deadline || 0) === Date.parse(req.deadline)) { req.state = 'lapsed'; break; }
       if (x.author !== participant || !(x.references || []).includes(e.event_id)) continue;
-      if ((x.type === 'ratify' || x.type === 'object') && Array.isArray(x.payload?.measures) && x.payload.measures.length) { req.state = 'delivered'; break; }
+      if (x.type === 'ratify' || x.type === 'object') {
+        const ids = credited.get(x.event_id);
+        if (ids && (about.length === 0 || about.some(id => ids.includes(id)))) { req.state = 'delivered'; break; }
+        continue;
+      }
       if (x.type !== 'turn') continue;
       const sig = REQUEST_SIGNALS.find(s => (x.payload?.signals || []).includes(s));
       if (sig === 'accepted') req.state = 'accepted';

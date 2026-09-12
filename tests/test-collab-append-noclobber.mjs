@@ -17,7 +17,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendEvent, readEvents } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import * as HELPERS from '../skills/collab/scripts/collab-event-helpers.mjs';
+const { appendEvent, readEvents } = HELPERS;
+const awaitHelpers = () => HELPERS;
 
 function mkCollabDir() {
   const dir = mkdtempSync(join(tmpdir(), 'collab-noclobber-'));
@@ -175,5 +177,57 @@ test('gate: a non-solo kickoff without measures is refused; a solo one is writte
     assert.throws(() => appendEvent(dir, ko('evt-001', ['review'])), /completion-measures-required/);
     assert.deepEqual(readdirSync(join(dir, 'events')), []);
     assert.equal(appendEvent(dir, ko('evt-001', [])).written, true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ------------------------------------------------------------ eligibility v1: Hale's acceptance additions
+
+test('gate: malformed measure field types are refused before any file is written', () => {
+  const dir = mkCollabDir();
+  try {
+    const ko = (id, measures) => ({ event_id: id, ts: '2026-09-11T10:00:00.000Z', author: 'p@h:i', slug: 's', type: 'kickoff', references: [],
+      payload: { message: 'm', igm: { intention: 'i', goal: 'g', measure: 'x' }, capabilities_wanted: ['review'], wall_clock_hours: 24, transport: 'localhost', ratified_completion_measures: measures } });
+    assert.throws(() => appendEvent(dir, ko('evt-001', 'M-A')), /completion-measures-required/);                // a string, not a list
+    assert.throws(() => appendEvent(dir, ko('evt-001', [null])), /completion-measure-invalid: \(missing id\)/);
+    assert.throws(() => appendEvent(dir, ko('evt-001', [{ id: 1, description: 'd', requires_review_from: R1 }])), /completion-measure-invalid: \(missing id\)/);
+    assert.throws(() => appendEvent(dir, ko('evt-001', [{ id: 'M-A', description: 'd', requires_review_from: ['x'] }])), /completion-measure-invalid: M-A/);
+    assert.deepEqual(readdirSync(join(dir, 'events')), [], 'a refused kickoff left a file behind');
+    mkLedger(dir);
+    // A verdict whose `measures` is not a list is unscoped, whatever it contains.
+    assert.throws(() => appendEvent(dir, verdict('evt-002', R1, { measures: 'M-A' })), /verdict-unscoped/);
+    assert.throws(() => appendEvent(dir, verdict('evt-003', R1, { measures: { id: 'M-A' } })), /verdict-unscoped/);
+    assert.deepEqual(readdirSync(join(dir, 'events')).filter(f => !f.startsWith('.tmp-')), ['evt-001.json']);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('gate: a second verdict on a measure the ledger already shows judged by the same reviewer is refused at write (verdict-duplicate)', () => {
+  const dir = mkCollabDir();
+  try {
+    mkLedger(dir);
+    appendEvent(dir, verdict('evt-002', R1, { measures: ['M-A'] }));
+    assert.throws(() => appendEvent(dir, { ...verdict('evt-003', R1, { measures: ['M-A', 'M-B'] }), type: 'object', payload: { reason: 'r', measures: ['M-A', 'M-B'] } }), /verdict-duplicate: core-codex@codex:host M-A/);
+    assert.deepEqual(readdirSync(join(dir, 'events')).filter(f => !f.startsWith('.tmp-')).sort(), ['evt-001.json', 'evt-002.json']);
+    // Two writers that both got past the read (the race v1 does not detect) still yield ONE credit.
+    writeFileSync(join(dir, 'events', 'evt-004.json'), JSON.stringify(verdict('evt-004', R1, { measures: ['M-A'] })));
+    const { measureVerdicts } = awaitHelpers();
+    assert.equal(measureVerdicts(readEvents(dir)).get('M-A').ratified.length, 1, 'duplicate credit');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recovery: a close re-appended after an interruption is idempotent; a conflicting close under the same id is refused; the first close is the terminal record', () => {
+  const dir = mkCollabDir();
+  try {
+    mkLedger(dir);
+    const close = { event_id: 'evt-close', ts: '2026-09-11T11:00:00.000Z', author: 'p@h:i', slug: 's', type: 'close', references: [], payload: { final_synthesis: 'x', outcome: 'failed-safely' } };
+    assert.equal(appendEvent(dir, close).written, true);
+    assert.deepEqual(appendEvent(dir, close), { written: false, idempotent: true }, 'the retry after an interrupted publish must succeed silently');
+    assert.throws(() => appendEvent(dir, { ...close, payload: { ...close.payload, outcome: 'converged' } }), /event id conflict/);
+    const events = readEvents(dir);
+    assert.equal(events.filter(e => e.type === 'close').length, 1);
+    assert.equal(events.find(e => e.type === 'close').payload.outcome, 'failed-safely');
+    // A second close from another writer under a fresh id is recorded (closes are distributed by
+    // design), but the terminal record every reader reports is still the first one.
+    appendEvent(dir, { ...close, event_id: 'evt-close-2', author: 'q@h:i', ts: '2026-09-11T11:00:01.000Z', payload: { final_synthesis: 'y', outcome: 'aborted-stall' } });
+    assert.equal(readEvents(dir).find(e => e.type === 'close').event_id, 'evt-close');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

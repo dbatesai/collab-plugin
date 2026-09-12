@@ -19,8 +19,8 @@ import {
   channelIdentity, hasJoinedIdentity, isClosed,
   checkSafetyNets, findActiveProposeClose, getRatificationStatus,
   getJoinedAgents, computeCloseOutcome, validateMeasures,
-  openRequests, waitCycles, effectiveDeadline, effectiveOnTimeout, executeTimeoutAction, isSystemTurn,
-  CHASE_FLOOD_LIMIT, OBLIGATION_GRACE_MS,
+  openRequests, waitCycles, evaluateObligations, executeTimeoutAction, isSystemTurn,
+  OBLIGATION_GRACE_MS,
   gitPullRebase, gitCommitPush,
   checkMinVersion, readLocalPluginVersion,
   detectHarness,
@@ -202,33 +202,15 @@ export async function tickDeterministic(slug, options = {}) {
   const chaseEvents = [];
   const timeoutActions = [];
   if (route === 'turn-or-propose') {
-    const joined = getJoinedAgents(events);
+    const joined = new Set(getJoinedAgents(events));
     const nowDate = new Date(nowTs);
-    for (const participant of joined) {
-      if (participant === triplet) continue; // don't chase ourselves
-      // The participant's latest substantive turn is their commitment: the deadline it
-      // declared, or its own timestamp plus one cadence. System turns commit nobody.
-      const theirEvents = events.filter(e => e.author === participant && e.type === 'turn' && !isSystemTurn(e));
-      const last = theirEvents[theirEvents.length - 1];
-      if (!last) continue;
-      const deadlineIso = effectiveDeadline(last, events);
-      const deadline = new Date(deadlineIso);
-      if (nowDate - deadline < OBLIGATION_GRACE_MS) continue; // within grace → no chase yet
-      const driftSeconds = Math.round((nowDate - deadline) / 1000);
+    const { due } = evaluateObligations(events, { now: nowTs, self: triplet });
+    for (const item of due) {
+      if (!joined.has(item.participant)) continue;
+      if (item.action !== 'chase') { timeoutActions.push(item); continue; }
 
-      // The chase sequence for this deadline. Once it is exhausted the declared (or default)
-      // timeout action executes, once — chasing forever is the silent stall.
-      const chasesForDeadline = events.filter(e => isSystemTurn(e) && e.author === triplet
-        && (e.payload?.signals || []).includes('chase') && e.payload.signals.includes(participant)
-        && new Date(e.ts) > deadline).length;
-      if (chasesForDeadline >= CHASE_FLOOD_LIMIT) {
-        const action = effectiveOnTimeout(last);
-        const settled = events.some(e => e.type === 'timeout-action' && e.payload?.participant === participant
-          && Date.parse(e.payload?.for_deadline || 0) === deadline.getTime());
-        if (action && !settled) timeoutActions.push({ participant, action, for_deadline: deadlineIso, chases_so_far: chasesForDeadline });
-        continue;
-      }
-
+      const { participant, for_deadline: deadlineIso } = item;
+      const driftSeconds = Math.round((nowDate - new Date(deadlineIso)) / 1000);
       // Flood limit: count recent chase events targeting this participant in last 60 min
       const floodWindow = 60 * 60 * 1000;
       const recentChases = events.filter(e =>
@@ -239,11 +221,12 @@ export async function tickDeterministic(slug, options = {}) {
       );
       if (recentChases.length >= 3) continue; // flood limit hit → skip
 
+      const last = [...events].reverse().find(e => e.author === participant && e.type === 'turn' && !isSystemTurn(e));
       const harness = detectHarness();
       const chaseEv = {
         event_id: generateEventId(nowTs, authorSlugFromTriplet(triplet)),
         ts: nowTs, author: triplet, slug, ...stamp,
-        type: 'turn', references: [last.event_id],
+        type: 'turn', references: last ? [last.event_id] : [],
         payload: {
           schema_version: '1.0',
           intent: 'clarify', state: 'blocked',  // obligation-missed → blocked on other participant
@@ -274,6 +257,8 @@ export async function tickDeterministic(slug, options = {}) {
         gitCommitPush(dir, transport, `[${triplet}] chase: ${chaseEvents.length} obligation(s) missed ${slug}`);
       }
     }
+    // The bound: the first tick at or after a deadline executes its fallback, once. The
+    // ticking participant's own deadline is included — an absent counterpart is the case.
     if (!dryRun) for (const item of timeoutActions) executeTimeoutAction(dir, item, triplet);
   }
 

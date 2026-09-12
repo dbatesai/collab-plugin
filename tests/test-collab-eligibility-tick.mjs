@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import { mkdirSync, rmSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendEvent, readEvents, CHASE_FLOOD_LIMIT } from '../skills/collab/scripts/collab-event-helpers.mjs';
+import * as H from '../skills/collab/scripts/collab-event-helpers.mjs';
+const { appendEvent, readEvents } = H;
 import { tickDeterministic } from '../skills/collab/scripts/collab-tick.mjs';
 
 process.env.COLLAB_STATE_ROOT = mkdtempSync(join(tmpdir(), 'collab-state-'));
@@ -212,8 +213,9 @@ test('tick/requests: a new wait cycle is recorded as one system turn per pair, n
   const T0 = Date.now() - 10 * MIN;
   const { dir, add } = mkChannel(slug, T0);
   try {
-    add(ME, 'turn', 2, turn(R1, R1));
-    add(R1, 'turn', 3, turn(ME, ME));
+    // Deadlines still ahead: a pair whose bounds have both lapsed dissolves by lapse instead.
+    add(ME, 'turn', 2, turn(R1, R1, { next_update_by: iso(T0 + 60 * MIN) }));
+    add(R1, 'turn', 3, turn(ME, ME, { next_update_by: iso(T0 + 60 * MIN) }));
     await tick(slug, false);
     const cycleTurns = () => readEvents(dir).filter(e => e.type === 'turn' && (e.payload?.signals || []).includes('wait-cycle'));
     assert.equal(cycleTurns().length, 1);
@@ -231,23 +233,69 @@ test('tick/requests: a new wait cycle is recorded as one system turn per pair, n
 
 // ------------------------------------------------------------------ chase loop defaults
 
-test('tick/chase: a peer turn with no deadline is chased one cadence plus grace later, and the default action executes after the chase sequence', async () => {
-  const slug = 'elig-tick-chase-default';
-  const T0 = Date.now() - 30 * MIN;
+test('tick/deadline: the first tick at or after a defaulted deadline executes the default fallback and records it once; the reminder comes after grace', async () => {
+  const slug = 'elig-tick-fallback-default';
+  const T0 = Date.now() - 12 * MIN;
   const { dir, add } = mkChannel(slug, T0, { joins: [R1] });
   try {
-    add(R1, 'turn', 5, turn(R1, null, { body: 'working on it' }));   // deadline T0+10, grace → due T0+15; now = T0+30
+    add(R1, 'turn', 5, turn(R1, null, { body: 'working on it' }));   // deadline T0+10; now = T0+12: past deadline, inside grace
     const first = await tick(slug, false);
-    assert.equal(first.chase_events_emitted, 1);
-    // Exhaust the chase sequence by hand (backdated so the flood window does not block them).
-    for (let i = 1; i < CHASE_FLOOD_LIMIT; i++) {
-      add(ME, 'turn', 16 + i, { intent: 'clarify', body: 'Obligation missed', signals: ['chase', 'obligation-missed', R1], state: 'blocked', owner: R1, waiting_on: R1, next_update_by: '' });
-    }
+    assert.equal(first.timeout_actions_executed, 1);
+    assert.equal(first.chase_events_emitted, 0, 'a chase inside the grace window');
+    const tas = () => readEvents(dir).filter(e => e.type === 'timeout-action' && e.payload?.participant === R1);
+    assert.equal(tas().length, 1);
+    assert.equal(tas()[0].payload.action, 'proceed-alone');
+    assert.equal(tas()[0].payload.for_deadline, iso(T0 + 10 * MIN));
     const second = await tick(slug, false);
-    assert.equal(second.chase_events_emitted, 0);
+    assert.equal(second.timeout_actions_executed, 0, 'the same deadline executed twice');
+    assert.equal(tas().length, 1);
+  } finally { cleanup(slug); }
+});
+
+test('tick/deadline: an explicit deadline missed by an hour is taken at the first tick, and the reminder is emitted beside it', async () => {
+  const slug = 'elig-tick-fallback-explicit';
+  const T0 = Date.now() - 70 * MIN;
+  const { dir, add } = mkChannel(slug, T0, { joins: [R1] });
+  try {
+    add(R1, 'turn', 5, turn(R1, null, { body: 'working', next_update_by: iso(T0 + 10 * MIN), on_timeout: 'reassign' }));
+    add(ME, 'turn', 60, turn(ME, null, { body: 'keeping the channel out of the stall net', next_update_by: iso(T0 + 120 * MIN) }));
+    const r = await tick(slug, false);
+    assert.equal(r.timeout_actions_executed, 1);
+    assert.equal(r.chase_events_emitted, 1);
     const ta = readEvents(dir).find(e => e.type === 'timeout-action' && e.payload?.participant === R1);
-    assert.ok(ta, 'the declared-by-default timeout action never executed after the chase sequence was exhausted');
-    assert.equal(ta.payload.action, 'proceed-alone');
+    assert.equal(ta.payload.action, 'reassign');
     assert.equal(ta.payload.for_deadline, iso(T0 + 10 * MIN));
+  } finally { cleanup(slug); }
+});
+
+test('tick/deadline: the requester\'s own tick executes the requester\'s own bound — the recipient being offline is the case it exists for', async () => {
+  const slug = 'elig-tick-fallback-own';
+  const T0 = Date.now() - 12 * MIN;
+  const { dir, add } = mkChannel(slug, T0, { joins: [R1] });
+  try {
+    const req = add(ME, 'turn', 5, turn(R1, R1, { body: 'please review M-A' }));   // ME's bound: T0+10, proceed-alone
+    const r = await tick(slug, false);                                              // ME ticks; R1 is silent
+    assert.equal(r.timeout_actions_executed, 1);
+    assert.equal(r.chase_events_emitted, 0, 'nobody chases themselves');
+    const ta = readEvents(dir).find(e => e.type === 'timeout-action');
+    assert.equal(ta.payload.participant, ME);
+    assert.deepEqual(readEvents(dir).filter(e => (e.payload?.signals || []).includes('chase')), []);
+    // The request has lapsed for the recipient, and the measure is still unmet.
+    assert.deepEqual(H.openRequests(readEvents(dir), R1), []);
+    assert.equal(H.openRequests(readEvents(dir), R1, { includeClosed: true }).find(x => x.request_id === req.event_id).state, 'lapsed');
+    assert.deepEqual(H.unmetRequiredReviews(readEvents(dir)).map(m => m.id), ['M-A', 'M-B', 'M-C']);
+  } finally { cleanup(slug); }
+});
+
+test('tick/requests: a refused verdict that references a request does not deliver it — the request stays open in the tick result', async () => {
+  const slug = 'elig-tick-refused-verdict-request';
+  const T0 = Date.now() - 10 * MIN;
+  const { add } = mkChannel(slug, T0);
+  try {
+    const req = add(R1, 'turn', 2, turn(ME, ME, { body: 'please confirm M-Z', next_update_by: iso(T0 + 60 * MIN), on_timeout: 'proceed-alone' }));
+    // ME is not a named reviewer, so the gate lets this through; the reader must still not count it.
+    add(ME, 'ratify', 3, { measures: ['M-Z'] }, [req.event_id], { raw: true });
+    const r = await tick(slug);
+    assert.deepEqual(r.open_requests.map(x => [x.request_id, x.state]), [[req.event_id, 'requested']]);
   } finally { cleanup(slug); }
 });

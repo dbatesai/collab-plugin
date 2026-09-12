@@ -313,8 +313,9 @@ Every `turn` event you emit MUST include `next_update_by` as a **machine-parseab
 
 - `next_update_by` is the schema field — **always ISO 8601** (`YYYY-MM-DDTHH:MM:SSZ`). Never a human-readable string. The chase logic, drift tracking, and obligation displays all parse this field; a human string silently breaks them.
 - `next_update_by_local` (optional) carries the human-readable version for display in event bodies. Use your system's 12-hour local time with timezone abbreviation.
-- If you have no firm commitment, use an empty string (`""`). **An empty or absent deadline is not "no deadline": it defaults to your turn's timestamp plus one tick cadence**, computed by every reader and never written back. Past that plus the 5-minute grace, you are chased like anyone else.
-- `on_timeout` names what the other side does when your deadline lapses and the chase sequence is exhausted: `proceed-alone`, `reassign`, `degrade-and-continue`, or `close-degraded`. Absent, it defaults to `proceed-alone` — the one action that moves no ownership. A value outside that list is refused as an unbounded wait.
+- If you have no firm commitment, use an empty string (`""`). **An empty or absent deadline is not "no deadline": it defaults to your turn's timestamp plus one tick cadence**, computed by every reader and never written back.
+- `on_timeout` names what happens when your deadline lapses: `proceed-alone`, `reassign`, `degrade-and-continue`, or `close-degraded`. Absent, it defaults to `proceed-alone` — the one action that moves no ownership. A value outside that list is refused as an unbounded wait.
+- **The first tick at or after your deadline executes the fallback**, whoever runs that tick — another participant's, or your own, since a counterpart who is not there is exactly the case the bound is for. It executes once per deadline and leaves a `timeout-action` event; a later tick never re-executes it, however late. Chases are reminders, not the bound: they start after the 5-minute grace, stop at the flood limit, and never move the deadline in either direction.
 - Only your own next substantive turn resets your deadline. A chase from the other side never does, and neither default ever moves the wall-clock or stall nets.
 
 Set a realistic deadline. Setting it far in the future to avoid chases defeats the accountability mechanism. A 20–30 minute window for plan work, 5 minutes for quick factual replies.
@@ -323,9 +324,10 @@ Set a realistic deadline. Setting it far in the future to avoid chases defeats t
 
 Every v1 turn names `waiting_on`. From this version the recipient's side reads it: a turn whose `waiting_on` is you is an open request on you, listed in the tick result's `open_requests` and in the **Waiting** table in `STATUS.md` (requester → recipient, since, deadline, fallback, state). A request moves through `requested` → `accepted` → `delivered`, or ends `declined` or `lapsed`:
 
-- Reference the request's event id and put `accepted`, `declined`, or `delivered` in `signals`. `accepted` changes the state, not the visibility — the request stays open until `delivered` or `declined`. A scoped `ratify`/`object` that references the request also delivers it.
-- Any other turn that merely references the request changes nothing. A clarifying question, a progress note, a later mention: the request is still open. Only the signals above, or the requester's own timeout fallback, resolve it.
-- `lapsed` is the requester's timeout action executing — the request is closed for the requester, and whatever measure it was about is still unmet.
+- Reference the request's event id and put `accepted`, `declined`, or `delivered` in `signals`. `accepted` changes the state, not the visibility — the request stays open until `delivered` or `declined`.
+- A `ratify`/`object` that references the request delivers it **only if the reader credits that verdict** — the same rule as measure credit: a verdict refused for an unknown id, a measure you do not owe, or a measure you already judged delivers nothing, and neither does a bare one. A request may say what it is about with `measures: ['<id>', ...]` on the turn; then only a credited verdict on one of those ids delivers it. A request that names no measure is delivered by any credited verdict that references it.
+- Any other turn that merely references the request changes nothing. A clarifying question, a progress note, a later mention: the request is still open. Only the signals above, a credited verdict, or the requester's own timeout fallback resolve it.
+- `lapsed` is the requester's timeout action executing at the first tick at or after the request's deadline — the request is closed for the requester, and whatever measure it was about is still unmet.
 
 A **wait cycle** is two participants each holding an open request on the other. The tick reports it in `wait_cycles` and records it once per pair as a system turn (`signals: ['wait-cycle', <a>, <b>]`), keyed by the two request ids so an unchanged pair is not re-announced. Acceptance on both sides is still a cycle. One side has to deliver, decline, or let its deadline lapse; the first authorized tick at or after that deadline takes the declared fallback.
 
@@ -350,7 +352,7 @@ If you miss your `next_update_by` plus a 5-minute grace period, the other side's
 2. Set a new `next_update_by` in your response
 3. The chase will stop when you post something
 
-The flood limit is 3 chase events per participant per 60-minute window. After the third chase for a deadline the other side's tick executes your `on_timeout` action (default `proceed-alone`) and records a `timeout-action` event, once per deadline — silence does not make the obligation disappear; it makes the declared fallback happen.
+The flood limit is 3 chase events per participant per 60-minute window. Chases are reminders; they do not gate anything. Your `on_timeout` action (default `proceed-alone`) executes at the first tick at or after your deadline, whether or not any chase was ever sent, and is recorded once as a `timeout-action` event — silence does not make the obligation disappear; it makes the declared fallback happen.
 
 ### v1.0 typed payload (for v1 emitters)
 

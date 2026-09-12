@@ -17,6 +17,7 @@ const { openRequests, waitCycles } = H;
 
 const A = 'core-framework@claude-code:host';
 const B = 'core-codex@codex:host';
+const C = 'core-gemini@antigravity:host';
 const MIN = 60 * 1000;
 const T0 = Date.UTC(2026, 8, 11, 10, 0);
 const iso = (ms) => new Date(ms).toISOString();
@@ -32,10 +33,15 @@ function ledger() {
   const ko = add(A, 'kickoff', 0, {
     message: 'm', igm: { intention: 'i', goal: 'g', measure: 'x' }, capabilities_wanted: ['review'], wall_clock_hours: 24,
     transport: 'localhost', tick_interval_minutes: 5,
-    ratified_completion_measures: [{ id: 'M-B', description: 'B reviews', requires_review_from: B }],
+    ratified_completion_measures: [
+      { id: 'M-B', description: 'B reviews the adapter', requires_review_from: B },
+      { id: 'M-B2', description: 'B reviews the docs', requires_review_from: B },
+      { id: 'M-C', description: 'C reviews the Windows run', requires_review_from: C },
+    ],
   });
   add(A, 'join', 0, { capability_match: [], commitment: 'c' }, [ko.event_id]);
-  add(B, 'join', 1, { capability_match: [], commitment: 'c', owes_review: ['M-B'] }, [ko.event_id]);
+  add(B, 'join', 1, { capability_match: [], commitment: 'c', owes_review: ['M-B', 'M-B2'] }, [ko.event_id]);
+  add(C, 'join', 1, { capability_match: [], commitment: 'c', owes_review: ['M-C'] }, [ko.event_id]);
   return { events, add };
 }
 
@@ -84,6 +90,47 @@ test('request: declined closes it; delivered closes it; a scoped verdict referen
   }
 });
 
+// The request-to-measure link: a request may say which measures it is about (`measures` on the
+// turn). Delivery by verdict reuses accepted-credit semantics exactly — only a verdict the reader
+// credits can discharge a request, and only if it judges what the request asked for.
+
+test('disposition: only an ACCEPTED scoped verdict delivers a request — refused shapes leave it open', () => {
+  const cases = {
+    'unknown id':            (add, req) => add(B, 'ratify', 15, { measures: ['M-Z'] }, [req.event_id]),
+    'wrong reviewer':        (add, req) => add(C, 'ratify', 15, { measures: ['M-B'] }, [req.event_id]),
+    'duplicate overlap':     (add, req) => { add(B, 'ratify', 12, { measures: ['M-B'] }); add(B, 'object', 15, { reason: 'r', measures: ['M-B', 'M-B2'] }, [req.event_id]); },
+    'bare verdict':          (add, req) => add(B, 'ratify', 15, {}, [req.event_id]),
+    'no verdict at all':     () => {},
+  };
+  for (const [name, arrange] of Object.entries(cases)) {
+    const { events, add } = ledger();
+    const req = request(add);
+    arrange(add, req);
+    const open = openRequests(events, B);
+    assert.equal(open.length, 1, `${name}: the request was discharged by a verdict the reader does not credit`);
+    assert.equal(open[0].request_id, req.event_id);
+    assert.equal(open[0].state, 'requested', name);
+  }
+});
+
+test('disposition: a valid verdict on an unrelated measure leaves a request that named its measure open; a matching one delivers it', () => {
+  const ask = (add) => add(A, 'turn', 10, turn({ body: 'please review the adapter', measures: ['M-B'], next_update_by: iso(T0 + 40 * MIN), on_timeout: 'proceed-alone' }));
+  let { events, add } = ledger();
+  let req = ask(add);
+  add(B, 'ratify', 15, { measures: ['M-B2'] }, [req.event_id]);           // accepted, but about the docs
+  assert.equal(openRequests(events, B)[0]?.state, 'requested', 'an unrelated accepted verdict delivered the request');
+  ({ events, add } = ledger());
+  req = ask(add);
+  add(B, 'ratify', 15, { measures: ['M-B2', 'M-B'] }, [req.event_id]);    // accepted, and it judges what was asked
+  assert.deepEqual(openRequests(events, B), []);
+  assert.equal(openRequests(events, B, { includeClosed: true })[0].state, 'delivered');
+  // A request that names no measure is delivered by any accepted verdict that references it.
+  ({ events, add } = ledger());
+  req = request(add);
+  add(B, 'object', 15, { reason: 'docs are stale', measures: ['M-B2'] }, [req.event_id]);
+  assert.deepEqual(openRequests(events, B), []);
+});
+
 test('request: the requester\'s own timeout fallback lapses it — and the measure stays unmet', () => {
   const { events, add } = ledger();
   const req = request(add);
@@ -92,7 +139,7 @@ test('request: the requester\'s own timeout fallback lapses it — and the measu
   const all = openRequests(events, B, { includeClosed: true });
   assert.equal(all[0].request_id, req.event_id);
   assert.equal(all[0].state, 'lapsed');
-  assert.deepEqual(H.unmetRequiredReviews(events, iso(T0 + 50 * MIN)).map(m => m.id), ['M-B']);
+  assert.deepEqual(H.unmetRequiredReviews(events, iso(T0 + 50 * MIN)).map(m => m.id), ['M-B', 'M-B2', 'M-C']);
 });
 
 test('cycle: A→B and B→A open requests form one pair with a stable key; acceptance does not dissolve it', () => {
