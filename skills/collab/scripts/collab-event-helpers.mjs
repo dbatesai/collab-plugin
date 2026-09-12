@@ -489,6 +489,28 @@ const isSubstantive = (e) => {
 };
 
 /**
+ * A turn's deadline: the strict-ISO `next_update_by` it declared, otherwise its own
+ * timestamp plus one cadence. Computed at read time and never written back — the ledger
+ * keeps showing what the writer said, and every reader derives the same bound from it.
+ */
+export function effectiveDeadline(turn, events) {
+  const dl = turn?.payload?.next_update_by;
+  if (typeof dl === 'string' && ISO_RE_OBL.test(dl)) return dl;
+  return new Date(Date.parse(turn.ts) + getTickIntervalMs(events)).toISOString();
+}
+
+/**
+ * A turn's timeout action: the declared one when the vocabulary knows it, `proceed-alone`
+ * when nothing was declared (the only action that moves no ownership), and null when
+ * something was declared that the vocabulary does not know — that is an error, not an absence.
+ */
+export function effectiveOnTimeout(turn) {
+  const a = turn?.payload?.on_timeout;
+  if (a == null || a === '') return 'proceed-alone';
+  return VALID_TIMEOUT_ACTIONS.includes(a) ? a : null;
+}
+
+/**
  * What is owed right now. Pure: takes events, returns findings. The scanner decides, not
  * in-the-moment judgment, because an agent deep in a long session will just keep waiting.
  */
@@ -496,22 +518,24 @@ export function evaluateObligations(events, { now, self }) {
   const nowMs = typeof now === 'number' ? now : Date.parse(now);
   const due = [], invalid = [];
 
+  // Every substantive turn is a commitment: the latest one per author carries that author's
+  // deadline, declared or defaulted. Chases and other system bookkeeping commit nobody.
   const latestPerAuthor = new Map();
   for (const e of events) {
-    if (e.type !== 'turn' || e.author === self) continue;
-    if (!e.payload?.next_update_by) continue;
+    if (e.type !== 'turn' || e.author === self || isChase(e)) continue;
     latestPerAuthor.set(e.author, e);
   }
 
   for (const [participant, e] of latestPerAuthor) {
-    const dl = e.payload.next_update_by;
-    if (!ISO_RE_OBL.test(dl)) continue;             // non-ISO deadlines are unreliable; skip
+    const dl = effectiveDeadline(e, events);
+    const action = effectiveOnTimeout(e);
 
-    // A wait with a deadline but no declared action is an unbounded wait.
-    if (!VALID_TIMEOUT_ACTIONS.includes(e.payload.on_timeout)) {
+    // A declared action the vocabulary does not know is an unbounded wait. Absence is not:
+    // it takes the default, the one action that moves no ownership.
+    if (action === null) {
       invalid.push({
         event_id: e.event_id, participant,
-        reason: `waiting with a deadline but no valid on_timeout (got ${JSON.stringify(e.payload.on_timeout)}); ` +
+        reason: `waiting with a deadline but an unrecognized on_timeout (got ${JSON.stringify(e.payload.on_timeout)}); ` +
                 `expected one of ${VALID_TIMEOUT_ACTIONS.join(', ')}`,
       });
       continue;
@@ -526,7 +550,7 @@ export function evaluateObligations(events, { now, self }) {
     const chases = events.filter(x => isChase(x) && Date.parse(x.ts) > Date.parse(dl)).length;
     due.push(chases < CHASE_FLOOD_LIMIT
       ? { participant, action: 'chase', for_deadline: dl, chases_so_far: chases }
-      : { participant, action: e.payload.on_timeout, for_deadline: dl, chases_so_far: chases });
+      : { participant, action, for_deadline: dl, chases_so_far: chases });
   }
 
   // Zero-progress escalation: a window containing only bookkeeping means the collaboration
@@ -693,13 +717,166 @@ export function requiredReviewers(events) {
  * @returns {Array<object>} the unmet measures, verbatim from the kickoff
  */
 export function unmetRequiredReviews(events, nowTs) {
+  const verdicts = measureVerdicts(events, nowTs);
+  return [...verdicts.values()]
+    .filter(v => v.ratified.length === 0 && v.objected.length === 0)
+    .map(v => v.measure);
+}
+
+// --- Eligibility: measures, scoped verdicts, and the close outcome ---
+//
+// Interpret by shape, guarantee at write. A verdict that names `measures` is scoped: it
+// credits exactly those ids, from declaration to terminal close. A verdict without the
+// field is the legacy shape: author-wide credit for every measure naming its author,
+// scoped to the propose-close on the table, as 1.1.0 read it. Both are labeled so a
+// receipt says how each credit was interpreted — the label proves nothing else.
+
+/** The kickoff's declared measures that name a reviewer, verbatim. Legacy ledgers: []. */
+export function declaredMeasures(events) {
   const kickoff = events.find(e => e.type === 'kickoff');
   const measures = kickoff?.payload?.ratified_completion_measures;
-  if (!Array.isArray(measures) || measures.length === 0) return [];
+  if (!Array.isArray(measures)) return [];
+  return measures.filter(m => m && typeof m.id === 'string' && typeof m.requires_review_from === 'string' && m.requires_review_from !== '');
+}
+
+/**
+ * Per-measure verdicts. Map id → { measure, ratified: [credit], objected: [credit] } where a
+ * credit is { by, scope: 'scoped'|'legacy', event_id, ts, reason? }. The first judgment a
+ * reviewer gives a measure stands; a later one on the same id is correspondence. A scoped
+ * verdict with any bad id credits nothing. Nothing after the close event counts.
+ */
+export function measureVerdicts(events) {
+  const out = new Map();
+  for (const m of declaredMeasures(events)) out.set(m.id, { measure: m, ratified: [], objected: [] });
+  if (out.size === 0) return out;
+  const closeIdx = events.findIndex(e => e.type === 'close');
+  const live = closeIdx === -1 ? events : events.slice(0, closeIdx);
+  let proposeIdx = -1;
+  live.forEach((e, i) => { if (e.type === 'propose-close') proposeIdx = i; });
+
+  const judged = new Set();                                // `${author}\n${id}`
+  const credit = (e, id, scope) => {
+    const key = `${e.author}\n${id}`;
+    if (judged.has(key)) return;
+    judged.add(key);
+    const c = { by: e.author, scope, event_id: e.event_id, ts: e.ts };
+    if (e.type === 'object') c.reason = e.payload?.reason;
+    out.get(id)[e.type === 'ratify' ? 'ratified' : 'objected'].push(c);
+  };
+
+  live.forEach((e, i) => {
+    if (e.type !== 'ratify' && e.type !== 'object') return;
+    const owed = [...out.values()].filter(v => v.measure.requires_review_from === e.author).map(v => v.measure.id);
+    if (owed.length === 0) return;                         // not a named reviewer: synthesis-only
+    if ('measures' in (e.payload || {})) {
+      const ids = e.payload.measures;
+      if (!Array.isArray(ids) || ids.length === 0) return; // unscoped: refused at write, ignored here
+      if (ids.some(id => !owed.includes(id) || judged.has(`${e.author}\n${id}`))) return; // whole-event refusal
+      for (const id of ids) credit(e, id, 'scoped');
+    } else if (proposeIdx !== -1 && i > proposeIdx) {
+      for (const id of owed) credit(e, id, 'legacy');
+    }
+  });
+  return out;
+}
+
+/**
+ * The one outcome calculation both close routes share. Returns null when the ledger declares
+ * no measures (a legacy session has no contract to compute). Any objection → failed-safely;
+ * any credit → complete-to-authority-boundary; nothing → failed-safely. Only the proposer
+ * route, with every measure ratified and the synthesis converged, may say converged.
+ */
+export function computeCloseOutcome(events, nowTs, { route } = {}) {
+  const verdicts = measureVerdicts(events);
+  if (verdicts.size === 0) return null;
+  const ratified_measures = [], objected_measures = [], unmet_ratified_measures = [];
+  for (const v of verdicts.values()) {
+    if (v.objected.length) for (const o of v.objected) objected_measures.push({ id: v.measure.id, by: o.by, reason: o.reason, scope: o.scope, event_id: o.event_id });
+    else if (v.ratified.length) ratified_measures.push({ id: v.measure.id, by: v.ratified[0].by, scope: v.ratified[0].scope, event_id: v.ratified[0].event_id });
+    else unmet_ratified_measures.push(v.measure);
+  }
   const status = getRatificationStatus(events, nowTs);
-  if (!status) return measures.filter(m => m?.requires_review_from);
-  const delivered = new Set([...status.explicitRatified, ...status.objected]);
-  return measures.filter(m => m?.requires_review_from && !delivered.has(m.requires_review_from));
+  let outcome = 'failed-safely';
+  if (objected_measures.length === 0 && ratified_measures.length > 0) {
+    outcome = (route === 'proposer' && unmet_ratified_measures.length === 0 && status?.converged)
+      ? 'converged' : 'complete-to-authority-boundary';
+  }
+  const via = route === 'stall' ? 'the stall net' : route === 'wall-clock' ? 'the wall-clock net' : 'the proposer route';
+  const note = outcome === 'converged'
+    ? 'Every declared measure carries a review from its named reviewer and the synthesis is ratified.'
+    : `Closed via ${via}. Measures listed as ratified carry a verdict from their named reviewer; `
+      + 'unmet ones never received a review and were not waived; objected ones block completion. '
+      + 'This is not a consensus and must not be described as one.';
+  return {
+    outcome,
+    receipt: {
+      ratified_measures, objected_measures, unmet_ratified_measures,
+      missing_reviews_from: [...new Set(unmet_ratified_measures.map(m => m.requires_review_from))],
+      ratified_by: status ? status.explicitRatified : [],
+      note,
+    },
+  };
+}
+
+// --- Requests you can see ---
+//
+// Every v1 turn names `waiting_on`; nobody read it from the recipient's side. A request is
+// open from the requesting turn until a disposition tied to it by reference: the recipient's
+// `declined` or `delivered` signal (or a scoped verdict), or the requester's own timeout
+// fallback (`lapsed`). `accepted` changes the state, not the visibility. Any other turn that
+// merely references the request changes nothing.
+
+const REQUEST_SIGNALS = ['accepted', 'declined', 'delivered'];
+
+/** Open requests on `participant`, oldest first. `includeClosed` returns the whole lifecycle. */
+export function openRequests(events, participant, { includeClosed = false } = {}) {
+  const out = [];
+  for (const e of events) {
+    if (e.type !== 'turn' || isChase(e) || e.author === participant) continue;
+    const to = e.payload?.waiting_on;
+    const names = Array.isArray(to) ? to.includes(participant) : to === participant;
+    if (!names) continue;
+    const req = {
+      request_id: e.event_id, from: e.author, to: participant, ts: e.ts,
+      body: e.payload?.body || '', deadline: effectiveDeadline(e, events),
+      on_timeout: effectiveOnTimeout(e) || 'proceed-alone', state: 'requested',
+    };
+    for (const x of events) {
+      if (Date.parse(x.ts) < Date.parse(e.ts) || x === e) continue;
+      if (x.type === 'timeout-action' && x.payload?.participant === e.author
+          && Date.parse(x.payload?.for_deadline || 0) === Date.parse(req.deadline)) { req.state = 'lapsed'; break; }
+      if (x.author !== participant || !(x.references || []).includes(e.event_id)) continue;
+      if ((x.type === 'ratify' || x.type === 'object') && Array.isArray(x.payload?.measures) && x.payload.measures.length) { req.state = 'delivered'; break; }
+      if (x.type !== 'turn') continue;
+      const sig = REQUEST_SIGNALS.find(s => (x.payload?.signals || []).includes(s));
+      if (sig === 'accepted') req.state = 'accepted';
+      else if (sig) { req.state = sig; break; }
+    }
+    if (includeClosed || req.state === 'requested' || req.state === 'accepted') out.push(req);
+  }
+  return out;
+}
+
+/**
+ * Mutual open requests: A waits on B while B waits on A. One pair per unordered participant
+ * pair, keyed by the two request ids so a repeated report on an unchanged pair can be
+ * suppressed. Acceptance on both sides is still a cycle; a disposition dissolves it.
+ */
+export function waitCycles(events) {
+  const authors = [...new Set(events.filter(e => e.type === 'turn').map(e => e.author))];
+  const open = new Map(authors.map(a => [a, openRequests(events, a)]));
+  const cycles = [];
+  for (let i = 0; i < authors.length; i++) {
+    for (let j = i + 1; j < authors.length; j++) {
+      const a = authors[i], b = authors[j];
+      const ab = open.get(b).find(r => r.from === a);   // a waits on b
+      const ba = open.get(a).find(r => r.from === b);   // b waits on a
+      if (!ab || !ba) continue;
+      const requests = [ab.request_id, ba.request_id].sort();
+      cycles.push({ key: requests.join('+'), participants: [a, b], requests });
+    }
+  }
+  return cycles;
 }
 
 export function getRatificationStatus(events, nowTs) {

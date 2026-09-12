@@ -134,7 +134,7 @@ test('12: an executed timeout action is not executed twice', () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('12: a waiting_on with no on_timeout is rejected at evaluation, not silently skipped', () => {
+test('12: a waiting_on with an unrecognized on_timeout is rejected at evaluation, not silently skipped', () => {
   const dir = mkChannel();
   try {
     appendEvent(dir, {
@@ -143,15 +143,34 @@ test('12: a waiting_on with no on_timeout is rejected at evaluation, not silentl
         schema_version: '1.0', intent: 'propose', body: 'w', signals: [],
         state: 'blocked', owner: ME, waiting_on: ME,
         provenance: { emit_mode: 'automated', harness: 'codex' },
-        next_update_by: iso(T0 + 60_000),   // deadline but NO on_timeout
+        next_update_by: iso(T0 + 60_000), on_timeout: 'panic',   // declared, and not in the vocabulary
       },
     });
     const r = evaluateObligations(readEvents(dir), { now: T0 + 600_000, self: ME });
     assert.ok(
       r.invalid.some(x => x.event_id === 'evt-bad'),
-      'a wait with a deadline but no declared timeout action passed unnoticed — that is an ' +
+      'a wait with a deadline but an unrecognized timeout action passed unnoticed — that is an ' +
       'unbounded wait, which the design forbids outright',
     );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('12: a waiting_on with NO on_timeout takes the default (proceed-alone) — an absence is not an error', () => {
+  const dir = mkChannel();
+  try {
+    appendEvent(dir, {
+      event_id: 'evt-abs', ts: iso(T0), author: PEER, slug: SLUG, type: 'turn', references: [],
+      payload: {
+        schema_version: '1.0', intent: 'propose', body: 'w', signals: [],
+        state: 'blocked', owner: ME, waiting_on: ME,
+        provenance: { emit_mode: 'automated', harness: 'codex' },
+        next_update_by: iso(T0 + 60_000),
+      },
+    });
+    for (let i = 0; i < CHASE_FLOOD_LIMIT; i++) chase(dir, `evt-c${i}`, T0 + 120_000 + i * 60_000);
+    const r = evaluateObligations(readEvents(dir), { now: T0 + 600_000, self: ME });
+    assert.deepEqual(r.invalid, []);
+    assert.equal(r.due.find(d => d.participant === PEER)?.action, 'proceed-alone');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
