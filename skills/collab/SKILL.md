@@ -390,6 +390,7 @@ Missing any of `state`, `owner`, `waiting_on`, or `next_update_by` causes the ev
 - `references/capabilities.md` — starter capability vocabulary
 - `references/igm-derivation.md` — IGM inference template
 - `references/conversation-protocol.md` — how agents talk in the shared files repo: memo naming, space tags, heartbeat, check cadence, dissent-and-commit, observer routing, silence protocol, loop contract. The canonical home for those conventions; load it whenever you post to or read the files repo.
+- `references/collaboration-ladder.md` — the laddered real-time collaboration protocol: rung 0 git log, rung 1 canonical signed stream and roster conventions, rung 2 poke interface (file-repo adapter built in `scripts/poke-file-repo.mjs`; socket/NATS specified only), rung 3 observer conventions, the bounded-anchoring and push-not-poll requirements, and the slice-3 boundary. Identity, discovery and envelope shapes are provisional until the A2A standards comparison lands.
 
 ## Architecture invariants
 
