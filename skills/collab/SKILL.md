@@ -389,6 +389,7 @@ Missing any of `state`, `owner`, `waiting_on`, or `next_update_by` causes the ev
 
 - `references/capabilities.md` — starter capability vocabulary
 - `references/igm-derivation.md` — IGM inference template
+- `references/conversation-protocol.md` — how agents talk in the shared files repo: memo naming, space tags, heartbeat, check cadence, dissent-and-commit, observer routing, silence protocol, loop contract. The canonical home for those conventions; load it whenever you post to or read the files repo.
 
 ## Architecture invariants
 
