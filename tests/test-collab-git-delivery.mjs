@@ -768,3 +768,25 @@ test('quarantine primitive: a supplied event that is not the bytes at its source
 });
 
 test.after(() => rmSync(BASE, { recursive: true, force: true }));
+
+test('git/pull: a close a peer published before this tick is routed from the pulled events — the tick exits closed', async () => {
+  const slug = 'git-pull-then-route';
+  const T0 = Date.now() - 12 * MIN;
+  const ch = mkGitChannel(slug, T0);
+
+  // The peer closes from its own clone and publishes; this participant's clone has not pulled.
+  const peer = join(BASE, `${slug}-peer`);
+  rmSync(peer, { recursive: true, force: true });
+  git(BASE, 'clone', '-q', join(BASE, `${slug}-remote.git`), peer);
+  git(peer, 'config', 'user.email', 'peer@example.com');
+  git(peer, 'config', 'user.name', 'peer');
+  const close = { event_id: 'evt-peer-close', ts: iso(T0 + 6 * MIN), author: R1, slug, type: 'close', references: [], payload: { final_synthesis: 'done', outcome: 'failed-safely' } };
+  writeFileSync(join(peer, 'collabs', `2026-09-11-${slug}`, 'events', `${close.event_id}.json`), JSON.stringify(close, null, 2));
+  git(peer, 'add', '.'); git(peer, 'commit', '-q', '-m', 'peer close'); git(peer, 'push', '-q');
+  assert.ok(!readEvents(ch.dir).some(e => e.type === 'close'), 'test setup: the close must not be local before the tick');
+
+  const r = await tick(slug);
+  assert.ok(readEvents(ch.dir).some(e => e.type === 'close'), 'the tick did not pull the peer close');
+  assert.equal(r.action, 'exit', `routed from the pre-pull snapshot: ${JSON.stringify(r).slice(0, 200)}`);
+  assert.equal(r.reason, 'closed');
+});

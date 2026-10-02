@@ -108,9 +108,10 @@ export async function tickDeterministic(slug, options = {}) {
     };
   }
   if (!dryRun) quarantineInvalidV1Events(dir, { author: triplet });
-  const events = readEvents(dir);
+  let events = readEvents(dir);
   const transport = transportFromEvents(events);
-  if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
+  // Route from what the pull brought in, not from the snapshot taken to find the transport.
+  if (!dryRun && isGitTransport(transport)) { gitPullRebase(transport); events = readEvents(dir); }
 
   // Advisory metadata stamped on everything this tick emits. Free to degrade; nothing
   // downstream routes on it.
