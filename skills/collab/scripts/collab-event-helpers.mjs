@@ -14,6 +14,7 @@ import { join, resolve, dirname, relative, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { isAnchored, anchorPending } from './collab-anchor.mjs';
 
 // detectHarness lives in transport.mjs (v0.2 fallback chain: CODEX → GEMINI → COLLAB_HARNESS_OVERRIDE → 'claude-code').
 // Imported here so deriveTriplet can call it; re-exported so existing call sites that import from helpers keep working.
@@ -344,6 +345,19 @@ function writerGateError(collabDir, event) {
   return null;
 }
 
+// An anchored (localhost) collab gives each event file one order slot after it is written. A
+// held order lock leaves the event unanchored — visible as such to collab-outcome — and the next
+// append anchors it; the event itself is already committed, so this never throws.
+function anchorAfterWrite(collabDir) {
+  if (!isAnchored(collabDir)) return {};
+  try { return { anchored: anchorPending(collabDir) }; }
+  catch (e) {
+    if (e.code !== 'EORDERLOCK') throw e;
+    process.stderr.write(`(warn) ${e.message}\n`);
+    return { anchor_error: e.message };
+  }
+}
+
 export function appendEvent(collabDir, event) {
   const violations = eventFilenameViolations(collabDir);
   if (violations.length) throw new Error(`event-filename-violation: ${violations.join(', ')} — nothing is written to this channel while a file under events/ is not named for the event it contains`);
@@ -371,7 +385,7 @@ export function appendEvent(collabDir, event) {
   try {
     linkSync(tmpPath, finalPath);
     unlinkSync(tmpPath);            // link made a second name for the same inode
-    return { written: true, idempotent: false };
+    return { written: true, idempotent: false, ...anchorAfterWrite(collabDir) };
   } catch (e) {
     if (e.code !== 'EEXIST') { try { unlinkSync(tmpPath); } catch { /* best effort */ } throw e; }
 
@@ -381,7 +395,7 @@ export function appendEvent(collabDir, event) {
     try { existing = readFileSync(finalPath, 'utf8'); } catch { /* unreadable; treat as conflict */ }
     try { unlinkSync(tmpPath); } catch { /* best effort */ }
 
-    if (existing === body) return { written: false, idempotent: true };
+    if (existing === body) return { written: false, idempotent: true, ...anchorAfterWrite(collabDir) };
 
     const err = new Error(
       `event id conflict: ${event.event_id} already exists in ${eventsDir} with different content. ` +

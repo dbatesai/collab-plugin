@@ -11,6 +11,7 @@
 import { writeFileSync, readFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ORDER_DIR } from './collab-anchor.mjs';
 import {
   deriveSlug, appendEvent, renderEventsJsonl,
   resolveIdentity, gitPullRebase, deliverChannel, recordOwnedArtifact, generatePin,
@@ -132,6 +133,9 @@ export async function kickoff(message, options = {}) {
 
   const { collabDir, turnsDir } = resolveTransportPaths(transport, dirName);
   mkdirSync(turnsDir, { recursive: true });
+  // A localhost collab is anchored from its first event: the order log decides what precedes the
+  // first close (collab-anchor.mjs). Git collabs are ordered by the remote's commit history.
+  if (parseTransport(transport).kind === 'localhost') mkdirSync(join(collabDir, ORDER_DIR), { recursive: true });
   const kickoffMd = buildKickoffMd(slug, message, igm, capabilitiesWanted, triplet);
   writeFileSync(join(collabDir, 'KICKOFF.md'), kickoffMd);
   recordOwnedArtifact(collabDir, triplet, 'KICKOFF.md', kickoffMd);
