@@ -9,7 +9,8 @@
  *
  * Refusals are named and stop the outcome: an anchored event whose bytes changed or vanished
  * (`ledger-mutated`, `orphan-slot`), an unparseable slot (`bad-slot`), or a collab with no
- * order log (`no-anchor`). Events with no slot yet are listed as `unanchored`.
+ * order log (`no-anchor`), or a missing slot number below the highest (`slot-gap`). Events with
+ * no slot yet are listed as `unanchored`.
  *
  * CLI: node collab-outcome.mjs <collab-dir> [--participant <triplet>] [--bytes]
  *   default: one JSON report line; --bytes: the canonical outcome bytes only (exit 3 if none).
@@ -37,6 +38,10 @@ export function computeOutcome(collabDir, { participant = null } = {}) {
 
   const { slots, bad } = readSlots(collabDir);
   for (const seq of bad) report.refusals.push(`bad-slot ${seq}`);
+  // Slots are only ever created contiguously under the order lock (a damaged file still holds
+  // its number), so a missing number below the highest one means a slot file was removed.
+  const taken = new Set([...slots.map(s => s.seq), ...bad]);
+  for (let seq = 1; seq < Math.max(0, ...taken); seq++) if (!taken.has(seq)) report.refusals.push(`slot-gap ${seq}`);
 
   // An event's anchor is its lowest slot; a later slot naming it again is a named placeholder.
   const firstSlot = new Map();

@@ -175,4 +175,12 @@ test('a damaged slot file holding the next number is skipped, never overwritten,
   assert.equal(readSlots(k.dir).slots.find(s => s.event_id === 'evt-after-bad').seq, next + 1);
 });
 
+test('a removed slot file in the middle of the log is a named slot-gap refusal', async () => {
+  const { k } = await closedRound('gap');
+  rmSync(join(k.dir, ORDER_DIR, '3.json'));
+  const r = computeOutcome(k.dir);
+  assert.equal(r.status, 'refused');
+  assert.ok(r.refusals.includes('slot-gap 3'), r.refusals.join(';'));
+});
+
 test('cleanup', () => { rmSync(ROOT, { recursive: true, force: true }); });
