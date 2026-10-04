@@ -1,7 +1,7 @@
 // collab-identity --show: the read-only lookup another plugin uses. It never mints.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -29,6 +29,17 @@ test('a persisted record is printed exactly; a malformed one exits 4', () => {
   assert.equal(show('proj-bad').status, 4);
   writeFileSync(join(ROOT, 'identity', 'proj-shape.json'), JSON.stringify({ triplet: 'x' }));
   assert.equal(show('proj-shape').status, 4);
+});
+
+test('a record filed under this workspace but storing another workspace id is refused, byte-unchanged; empty fields are malformed', () => {
+  const misfiled = JSON.stringify({ workspace_id: 'proj-B', triplet: 'proj-B@claude-code:h', participant_id: 'p-B' });
+  writeFileSync(join(ROOT, 'identity', 'proj-A.json'), misfiled);
+  const r = show('proj-A');
+  assert.equal(r.status, 5);
+  assert.match(r.stderr, /belongs to workspace "proj-B"/);
+  assert.equal(readFileSync(join(ROOT, 'identity', 'proj-A.json'), 'utf8'), misfiled);
+  writeFileSync(join(ROOT, 'identity', 'proj-empty.json'), JSON.stringify({ workspace_id: 'proj-empty', triplet: ' ', participant_id: 'p' }));
+  assert.equal(show('proj-empty').status, 4);
 });
 
 test('cleanup', () => { rmSync(ROOT, { recursive: true, force: true }); });

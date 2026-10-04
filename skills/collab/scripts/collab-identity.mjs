@@ -206,15 +206,18 @@ export function resolveIdentity(workspaceId, opts = {}) {
  * Read-only lookup for another plugin that needs this workspace's persisted participant
  * (CORE's collab sync passes its opaque project id as the workspace id). Never mints.
  * Exit 0 with {workspace_id, triplet, participant_id}; 3 when no record exists; 4 when the
- * record is unreadable or malformed.
+ * record is unreadable, malformed or has an empty field; 5 when the record stores a different
+ * workspace id than the one asked for.
  */
 export function showIdentity(workspaceId) {
   const path = identityRecordPath(workspaceId);
   if (!existsSync(path)) return { code: 3, error: `no identity record for workspace ${workspaceId}` };
   let rec;
   try { rec = JSON.parse(readFileSync(path, 'utf8')); } catch { return { code: 4, error: `identity record unreadable: ${path}` }; }
-  if (!rec || typeof rec.participant_id !== 'string' || typeof rec.triplet !== 'string') return { code: 4, error: `identity record malformed: ${path}` };
-  return { code: 0, out: { workspace_id: workspaceId, triplet: rec.triplet, participant_id: rec.participant_id } };
+  if (!rec || typeof rec.participant_id !== 'string' || !rec.participant_id.trim() || typeof rec.triplet !== 'string' || !rec.triplet.trim()) return { code: 4, error: `identity record malformed: ${path}` };
+  // A restored or misfiled record must not answer for another workspace: the id it stores is the binding.
+  if (rec.workspace_id !== workspaceId) return { code: 5, error: `identity record at ${path} belongs to workspace ${JSON.stringify(rec.workspace_id)}, not ${workspaceId}` };
+  return { code: 0, out: { workspace_id: rec.workspace_id, triplet: rec.triplet, participant_id: rec.participant_id } };
 }
 
 const _real = (p) => { try { return realpathSync(p); } catch { return p; } };
