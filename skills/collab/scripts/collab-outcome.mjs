@@ -40,8 +40,13 @@ export function computeOutcome(collabDir, { participant = null } = {}) {
   for (const seq of bad) report.refusals.push(`bad-slot ${seq}`);
   // Slots are only ever created contiguously under the order lock (a damaged file still holds
   // its number), so a missing number below the highest one means a slot file was removed.
-  const taken = new Set([...slots.map(s => s.seq), ...bad]);
-  for (let seq = 1; seq < Math.max(0, ...taken); seq++) if (!taken.has(seq)) report.refusals.push(`slot-gap ${seq}`);
+  // Walk the numbers that exist, never the range up to the highest: work stays bounded by the
+  // number of slot files however large a forged number is.
+  let expected = 1;
+  for (const seq of [...new Set([...slots.map(s => s.seq), ...bad])].sort((a, b) => a - b)) {
+    if (seq > expected) report.refusals.push(seq - 1 === expected ? `slot-gap ${expected}` : `slot-gap ${expected}-${seq - 1}`);
+    expected = seq + 1;
+  }
 
   // An event's anchor is its lowest slot; a later slot naming it again is a named placeholder.
   const firstSlot = new Map();

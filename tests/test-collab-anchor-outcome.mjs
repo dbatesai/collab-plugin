@@ -183,4 +183,15 @@ test('a removed slot file in the middle of the log is a named slot-gap refusal',
   assert.ok(r.refusals.includes('slot-gap 3'), r.refusals.join(';'));
 });
 
+test('a forged huge slot number is refused as one gap range, in bounded time', async () => {
+  const { k } = await closedRound('hugegap');
+  const big = 9_000_000_000_000;
+  writeFileSync(join(k.dir, ORDER_DIR, `${big}.json`), JSON.stringify({ seq: big, event_id: 'evt-forged', sha256: 'f'.repeat(64) }) + '\n');
+  const t0 = Date.now();
+  const r = computeOutcome(k.dir);
+  assert.ok(Date.now() - t0 < 2000, 'bounded');
+  assert.equal(r.status, 'refused');
+  assert.ok(r.refusals.some(x => x.startsWith('slot-gap ') && x.endsWith(`-${big - 1}`)), r.refusals.join(';'));
+});
+
 test('cleanup', () => { rmSync(ROOT, { recursive: true, force: true }); });
