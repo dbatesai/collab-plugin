@@ -152,7 +152,9 @@ export async function main(argv) {
   if (!hit) { process.stderr.write(`no collab: ${slug}\n`); return 2; }
   const events = readEvents(hit.dir);
   // The channel's own ledger gets first say, so a pre-identity channel keeps resolving.
-  const triplet = channelIdentity(events, workspaceId || 'unknown').triplet;
+  let triplet;
+  try { triplet = channelIdentity(events, workspaceId || 'unknown').triplet; }
+  catch (e) { if (e.code !== 'EWORKSPACEID') throw e; process.stderr.write(`${e.message}\n`); return 2; }
   const cursorPath = cursorFilePath(triplet, slug, { transport: hit.transport });
   const state = readCursorState(cursorPath, triplet, slug, hit.transport);
 

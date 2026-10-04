@@ -233,7 +233,9 @@ export function main(argv) {
   }
   if (!message) { process.stderr.write('usage: collab-route.mjs "<message>" [--workspace-id <id>]\n'); return 2; }
   const { transport: explicitTransport, rest } = extractTransport(message);
-  const identity = resolveIdentity(workspaceId);
+  let identity;
+  try { identity = resolveIdentity(workspaceId); }
+  catch (e) { if (e.code !== 'EWORKSPACEID') throw e; process.stderr.write(`${e.message}\n`); return 2; }
   const triplet = identity.triplet;
   const state = buildStateFromDisk(identity);
   const result = detectAction(rest, state, explicitTransport);

@@ -76,7 +76,7 @@ Gemini install follows the same single-plugin-root pattern via `.gemini-plugin/p
 
 ### Required dependencies
 
-- **core-plugin is optional.** Collab runs on its own: it mints and keeps its own participant identity and needs only a stable `--workspace-id` per workspace. With core-plugin installed, pass CORE's `project_id` as that id, and CORE lands each closed collab's outcome into the project's memory.
+- **core-plugin is optional.** Collab runs on its own: it mints and keeps its own participant identity and needs only a stable `--workspace-id` per workspace (a call without one refuses, except on a machine that already minted an identity under the old `unknown` default). With core-plugin installed, pass CORE's `project_id` as that id, and CORE lands each closed collab's outcome into the project's memory.
 - **Node.js 18+** on each machine.
 - For `github:<repo>` transport: **`gh` CLI** authenticated with push access to the repo, and the repo cloned locally at `~/Documents/Projects/<repo>/` with standing pull/push permissions for the running agent. (The default `github:files` transport assumes `~/Documents/Projects/files/`.)
 - For `localhost` transport: nothing extra — the `~/.collab/local/` directory is created on first kickoff.

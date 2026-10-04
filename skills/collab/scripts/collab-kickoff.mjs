@@ -106,6 +106,9 @@ export async function kickoff(message, options = {}) {
   // Runs on dry runs too: a dry run still writes the kickoff locally, and without the check it
   // appends into a live same-day collab of the same slug.
   assertSlugUnique(slug);
+  // Mints the participant on first use and reads the persisted record after; refuses a missing
+  // workspace id here, before any transport side effect.
+  const identity = resolveIdentity(workspaceId);
 
   const date = new Date().toISOString().slice(0, 10);
   const dirName = `${date}-${slug}`;
@@ -118,9 +121,7 @@ export async function kickoff(message, options = {}) {
   if (!dryRun && isGitTransport(transport)) gitPullRebase(transport);
 
   const igm = deriveIGM(message);
-  // Mints the participant on first use and reads the persisted record after. `harness` is
-  // read fresh and travels beside the identity on each event, never inside it.
-  const identity = resolveIdentity(workspaceId);
+  // `harness` is read fresh and travels beside the identity on each event, never inside it.
   const triplet = identity.triplet;
   const nowTs = new Date().toISOString();
   const collabPin = pin || generatePin();

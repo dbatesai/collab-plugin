@@ -21,7 +21,7 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { join, dirname, resolve } from 'node:path';
+import { join, dirname, resolve, basename } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { detectHarness, localCollabsRoot } from './transport.mjs';
@@ -163,6 +163,13 @@ export function findAdmittedIdentity(events, { workspaceId, machine, participant
  * @returns {{participant_id: string, triplet: string, workspace_id: string, machine: string,
  *            harness: string, harness_at_mint: string, minted_at: string, source: string}}
  */
+/** The refusal for a call with no `--workspace-id` and no legacy identity to fall back on. */
+export function missingWorkspaceId(cwd = process.cwd()) {
+  const e = new Error(`--workspace-id is required: pass a stable name for this workspace and reuse it every time (for example --workspace-id ${safeFileName(basename(cwd))}; with core-plugin installed, use the project's project_id)`);
+  e.code = 'EWORKSPACEID';
+  return e;
+}
+
 export function resolveIdentity(workspaceId, opts = {}) {
   const ws = workspaceId || 'unknown';
   const machine = deriveMachine();
@@ -175,6 +182,10 @@ export function resolveIdentity(workspaceId, opts = {}) {
         participantId: record?.participant_id, triplet: record?.triplet,
       })
     : null;
+
+  // No workspace id: an identity already minted or admitted under the old 'unknown' default is
+  // kept; anyone else must name the workspace, so two unrelated workspaces never share one.
+  if (safeFileName(ws) === 'unknown' && !record && !admitted) throw missingWorkspaceId();
 
   if (!record) {
     // First contact. If a channel already admitted us, mint AGAINST that ledger rather than

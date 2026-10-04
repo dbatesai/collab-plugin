@@ -6,6 +6,10 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Behavior changes for existing callers
+
+- A call with no `--workspace-id` refuses (`EWORKSPACEID`, exit 2, nothing minted) instead of keying the identity to the literal `unknown`, which two unrelated workspaces would share. A machine that already minted an identity under `unknown`, or a channel that already admitted one, keeps resolving to it.
+
 ## [1.2.0] — 2026-09-12
 
 ### Behavior changes for existing callers

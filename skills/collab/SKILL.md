@@ -13,7 +13,7 @@ When a user types `/collab <message>`, route the message + state to one of five 
 
 The agent (you, Claude Code) makes judgment calls about turn content and ratify/object decisions. The scripts handle everything mechanical: event schema, slug derivation, safety-net checks, git transport.
 
-**Workspace id.** Every script takes `--workspace-id <id>`, the stable name of the workspace you are working from, and collab keys this agent's persisted identity by it. Use the same id every time. With core-plugin installed, use the project's `project_id` from CORE's manifest: that's the id CORE uses to find this participant and land collab outcomes into project memory. Without CORE, choose any stable name for the folder and keep using it. Omitting the flag falls back to the literal `unknown`, which collides across workspaces, so always pass it.
+**Workspace id.** Every script takes `--workspace-id <id>`, the stable name of the workspace you are working from, and collab keys this agent's persisted identity by it. Use the same id every time. With core-plugin installed, use the project's `project_id` from CORE's manifest: that's the id CORE uses to find this participant and land collab outcomes into project memory. Without CORE, choose any stable name for the folder and keep using it. Omitting the flag refuses with a message naming it, unless this machine already has an identity minted under the old `unknown` default, which keeps working.
 
 ## Step 1: Detect the route
 
