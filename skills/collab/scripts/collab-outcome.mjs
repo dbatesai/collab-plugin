@@ -12,7 +12,8 @@
  * order log (`no-anchor`), or a missing slot number below the highest (`slot-gap`). Events with
  * no slot yet are listed as `unanchored`.
  *
- * CLI: node collab-outcome.mjs <collab-dir> [--participant <triplet>] [--bytes]
+ * CLI: node collab-outcome.mjs <collab-dir> [--participant <triplet|participant-id>]... [--bytes]
+ *   --participant may repeat; `joined` is true when any of them joined.
  *   default: one JSON report line; --bytes: the canonical outcome bytes only (exit 3 if none).
  */
 import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
@@ -33,6 +34,7 @@ export function canonicalJson(value) {
 }
 
 export function computeOutcome(collabDir, { participant = null } = {}) {
+  const who = participant == null ? null : [].concat(participant);
   const report = { status: 'open', mapping: MAPPING, collab_dir: basename(collabDir), refusals: [], unanchored: [], duplicate_slots: [], late: [] };
   if (!isAnchored(collabDir)) { report.status = 'refused'; report.refusals.push('no-anchor'); return report; }
 
@@ -77,7 +79,7 @@ export function computeOutcome(collabDir, { participant = null } = {}) {
   const closeIdx = ordered.findIndex(s => events.get(s.event_id).type === 'close');
   const prefixSlots = closeIdx === -1 ? ordered : ordered.slice(0, closeIdx + 1);
   const prefix = prefixSlots.map(s => events.get(s.event_id));
-  if (participant) report.joined = prefix.some(e => e.type === 'join' && (e.author === participant || e.participant_id === participant));
+  if (who) report.joined = prefix.some(e => e.type === 'join' && (who.includes(e.author) || who.includes(e.participant_id)));
   if (closeIdx === -1) return report;
 
   report.late = ordered.slice(closeIdx + 1).map(s => s.event_id);
@@ -111,14 +113,15 @@ export function computeOutcome(collabDir, { participant = null } = {}) {
 }
 
 export function main(argv) {
-  let dir = null, participant = null, bytesOnly = false;
+  let dir = null, bytesOnly = false;
+  const participant = [];
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === '--participant') participant = argv[++i];
+    if (argv[i] === '--participant') participant.push(argv[++i]);
     else if (argv[i] === '--bytes') bytesOnly = true;
     else if (!argv[i].startsWith('--')) dir = argv[i];
   }
   if (!dir) { process.stderr.write('usage: collab-outcome.mjs <collab-dir> [--participant <triplet>] [--bytes]\n'); return 2; }
-  const r = computeOutcome(dir, { participant });
+  const r = computeOutcome(dir, { participant: participant.length ? participant : null });
   if (bytesOnly) {
     if (r.status !== 'closed') { process.stderr.write(`no outcome: ${r.status} ${r.refusals.join('; ')}\n`); return 3; }
     process.stdout.write(r.outcome_bytes);

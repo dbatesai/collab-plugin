@@ -19,7 +19,8 @@
  * The default root is ~/.collab/identity, a sibling of ~/.collab/local, and follows
  * COLLAB_LOCAL_ROOT so a test fixture never touches the real store.
  */
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -199,4 +200,31 @@ export function resolveIdentity(workspaceId, opts = {}) {
   }
 
   return { ...record, harness, source: 'persisted' };
+}
+
+/**
+ * Read-only lookup for another plugin that needs this workspace's persisted participant
+ * (CORE's collab sync passes its opaque project id as the workspace id). Never mints.
+ * Exit 0 with {workspace_id, triplet, participant_id}; 3 when no record exists; 4 when the
+ * record is unreadable or malformed.
+ */
+export function showIdentity(workspaceId) {
+  const path = identityRecordPath(workspaceId);
+  if (!existsSync(path)) return { code: 3, error: `no identity record for workspace ${workspaceId}` };
+  let rec;
+  try { rec = JSON.parse(readFileSync(path, 'utf8')); } catch { return { code: 4, error: `identity record unreadable: ${path}` }; }
+  if (!rec || typeof rec.participant_id !== 'string' || typeof rec.triplet !== 'string') return { code: 4, error: `identity record malformed: ${path}` };
+  return { code: 0, out: { workspace_id: workspaceId, triplet: rec.triplet, participant_id: rec.participant_id } };
+}
+
+const _real = (p) => { try { return realpathSync(p); } catch { return p; } };
+if (process.argv[1] && _real(process.argv[1]) === _real(fileURLToPath(import.meta.url))) {
+  const i = process.argv.indexOf('--show');
+  const ws = i > -1 ? process.argv[i + 1] : null;
+  if (!ws) { process.stderr.write('usage: collab-identity.mjs --show <workspace-id>\n'); process.exitCode = 2; }
+  else {
+    const r = showIdentity(ws);
+    if (r.code === 0) process.stdout.write(JSON.stringify(r.out) + '\n'); else process.stderr.write(r.error + '\n');
+    process.exitCode = r.code;
+  }
 }
