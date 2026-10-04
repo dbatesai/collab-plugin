@@ -165,4 +165,14 @@ test('distinct concurrent appenders get unique contiguous slots, and a concurren
   assert.equal(new Set(slots.map(s => s.event_id)).size, slots.length);
 });
 
+test('a damaged slot file holding the next number is skipped, never overwritten, and stays a named refusal', async () => {
+  const k = await kickoff(`anchor badslot ${++n}`, { workspaceId: 'anchor-test', transport: 'localhost' });
+  const next = readSlots(k.dir).slots.length + 1;
+  writeFileSync(join(k.dir, ORDER_DIR, `${next}.json`), 'not json');
+  appendEvent(k.dir, { event_id: 'evt-after-bad', ts: new Date().toISOString(), author: R1, slug: k.slug, type: 'note', references: [], payload: {} });
+  const r = computeOutcome(k.dir);
+  assert.deepEqual(r.refusals, [`bad-slot ${next}`]);
+  assert.equal(readSlots(k.dir).slots.find(s => s.event_id === 'evt-after-bad').seq, next + 1);
+});
+
 test('cleanup', () => { rmSync(ROOT, { recursive: true, force: true }); });
