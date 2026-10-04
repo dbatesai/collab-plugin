@@ -17,6 +17,7 @@ import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmdirSync, 
 import { join } from 'node:path';
 
 export const ORDER_DIR = 'order';
+export const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const LOCK_RETRIES = 50;
 const LOCK_DELAY_MS = 20;
 
@@ -34,7 +35,8 @@ export function readSlots(collabDir) {
     if (!m) continue;
     try {
       const s = JSON.parse(readFileSync(join(dir, name), 'utf8'));
-      if (s.seq !== Number(m[1]) || !s.event_id || !s.sha256) throw new Error('shape');
+      // event_id becomes a path component in readers: filename-safe characters only, never a separator
+      if (s.seq !== Number(m[1]) || typeof s.event_id !== 'string' || !EVENT_ID_RE.test(s.event_id) || !/^[0-9a-f]{64}$/.test(s.sha256)) throw new Error('shape');
       slots.push(s);
     } catch { bad.push(Number(m[1])); }
   }

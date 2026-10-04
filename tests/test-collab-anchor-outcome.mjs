@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, linkSync, rmdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 
 const ROOT = mkdtempSync(join(tmpdir(), 'collab-anchor-'));
@@ -23,7 +24,7 @@ const { computeOutcome } = await import('../skills/collab/scripts/collab-outcome
 const { readSlots, ORDER_DIR } = await import('../skills/collab/scripts/collab-anchor.mjs');
 
 const R1 = 'core-codex@codex:host';
-const WORKER = new URL('./fixtures/anchor-worker.mjs', import.meta.url).pathname;
+const WORKER = fileURLToPath(new URL('./fixtures/anchor-worker.mjs', import.meta.url));
 let n = 0;
 
 /** kickoff → R1 joins → proposer proposes close → R1 ratifies the measure → tick closes. */
@@ -192,6 +193,21 @@ test('a forged huge slot number is refused as one gap range, in bounded time', a
   assert.ok(Date.now() - t0 < 2000, 'bounded');
   assert.equal(r.status, 'refused');
   assert.ok(r.refusals.some(x => x.startsWith('slot-gap ') && x.endsWith(`-${big - 1}`)), r.refusals.join(';'));
+});
+
+test('a slot whose event id would escape events/ is a named bad-slot refusal, and nothing outside is read', async () => {
+  const { k } = await closedRound('escape');
+  const outside = join(k.dir, '..', 'outside.json');
+  writeFileSync(outside, '{"type":"close"}');
+  const next = readSlots(k.dir).slots.length + 1;
+  for (const [i, id] of ['../../outside', '..\\outside', '/etc/passwd', '.hidden'].entries()) {
+    writeFileSync(join(k.dir, ORDER_DIR, `${next + i}.json`), JSON.stringify({ seq: next + i, event_id: id, sha256: 'a'.repeat(64) }) + '\n');
+  }
+  const r = computeOutcome(k.dir);
+  assert.equal(r.status, 'refused');
+  for (let i = 0; i < 4; i++) assert.ok(r.refusals.includes(`bad-slot ${next + i}`), r.refusals.join(';'));
+  assert.ok(!r.refusals.some(x => x.includes('outside')), 'no refusal names a path outside events/');
+  rmSync(outside);
 });
 
 test('cleanup', () => { rmSync(ROOT, { recursive: true, force: true }); });
