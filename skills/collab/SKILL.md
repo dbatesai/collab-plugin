@@ -1,6 +1,6 @@
 ---
 name: collab
-description: "Autonomous multi-agent collaboration. Single /collab <message> command routes by message + state into five paths — kickoff, join, tick, status, abort. Structured JSONL events on two transports — localhost (~/.collab/local/) for same-machine; github:<repo> for cross-machine. Cross-machine + cross-harness. Requires core-plugin."
+description: "Autonomous multi-agent collaboration. Single /collab <message> command routes by message + state into five paths — kickoff, join, tick, status, abort. Structured JSONL events on two transports — localhost (~/.collab/local/) for same-machine; github:<repo> for cross-machine. Cross-machine + cross-harness. Works on its own; adds project memory when core-plugin is installed."
 ---
 
 # collab
@@ -12,6 +12,8 @@ When a user types `/collab <message>`, route the message + state to one of five 
 **Path variable:** Script examples below use `${COLLAB_PLUGIN_ROOT}`. Substitute the actual path for your harness: `${COLLAB_PLUGIN_ROOT}` on Claude Code, `${CODEX_PLUGIN_ROOT}` on Codex, `${GEMINI_PLUGIN_ROOT}` on Gemini CLI.
 
 The agent (you, Claude Code) makes judgment calls about turn content and ratify/object decisions. The scripts handle everything mechanical: event schema, slug derivation, safety-net checks, git transport.
+
+**Workspace id.** Every script takes `--workspace-id <id>`, the stable name of the workspace you are working from, and collab keys this agent's persisted identity by it. Use the same id every time. With core-plugin installed, use the project's `project_id` from CORE's manifest: that's the id CORE uses to find this participant and land collab outcomes into project memory. Without CORE, choose any stable name for the folder and keep using it. Omitting the flag falls back to the literal `unknown`, which collides across workspaces, so always pass it.
 
 ## Step 1: Detect the route
 
