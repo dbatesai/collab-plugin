@@ -102,7 +102,9 @@ export async function kickoff(message, options = {}) {
   const slug = deriveSlug(message);
 
   // Order is load-bearing: collision check before any side effects (preflight, git, mkdir).
-  if (!dryRun) assertSlugUnique(slug);
+  // Runs on dry runs too: a dry run still writes the kickoff locally, and without the check it
+  // appends into a live same-day collab of the same slug.
+  assertSlugUnique(slug);
 
   const date = new Date().toISOString().slice(0, 10);
   const dirName = `${date}-${slug}`;

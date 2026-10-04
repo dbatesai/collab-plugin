@@ -205,3 +205,25 @@ test('kickoff rejects when slug already exists in any transport', async () => {
     rmSync(collisionDir, { recursive: true, force: true });
   }
 });
+
+test('kickoff --dry-run refuses a slug that already exists instead of appending into the live collab', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, readFileSync, readdirSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const home = mkdtempSync(join(tmpdir(), 'collab-dryrun-'));
+  const env = { ...process.env, HOME: home, USERPROFILE: home, COLLAB_LOCAL_ROOT: join(home, 'local'), COLLAB_REPOS_ROOT: join(home, 'repos') };
+  const cli = new URL('../skills/collab/scripts/collab-kickoff.mjs', import.meta.url).pathname;
+  const run = (...extra) => spawnSync(process.execPath, [cli, 'review the widget plan', '--workspace-id', 'w1', '--transport', 'localhost', ...extra], { env, encoding: 'utf8' });
+  try {
+    assert.equal(run().status, 0);
+    const [dir] = readdirSync(join(home, 'local'));
+    const eventsPath = join(home, 'local', dir, 'events.jsonl');
+    const before = readFileSync(eventsPath, 'utf8');
+    const dry = run('--dry-run');
+    assert.notEqual(dry.status, 0, 'dry run on an existing slug must refuse');
+    assert.match(dry.stderr, /already exists/);
+    assert.equal(readFileSync(eventsPath, 'utf8'), before, 'live event log must be untouched');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
