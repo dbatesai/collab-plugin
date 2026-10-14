@@ -12,3 +12,5 @@ Conventions (settled by Keel, Hale and Agy, 2026-09-12):
 Contents:
 
 - `handoff-controls/` the three review-handoff controls Keel owes after v1: a clean authorized baseline, a moved base, and a code fix with authority removed.
+
+The receipt shape that records these controls, including the boundaries and controls table, is `docs/specs/receipts-template.md`.
